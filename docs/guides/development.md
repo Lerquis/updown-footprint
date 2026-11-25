@@ -1,0 +1,60 @@
+# Guía de desarrollo
+
+## Requisitos
+Node ≥ 20 (probado en 24), npm ≥ 10.
+
+## Arranque
+```
+npm install
+npm run dev          # server http://localhost:4000, web http://localhost:3000
+```
+Copiar `apps/*/.env.example` a `.env` / `.env.local` si se quiere cambiar la configuración. El servidor tarda unos segundos en estar `ready` (relleno de 15 min de trades por REST).
+
+## Variables de entorno
+| App | Variable | Default | Uso |
+|---|---|---|---|
+| server | `PORT` | 4000 | Puerto HTTP/WS |
+| server | `ALLOWED_ORIGIN` | vacío | Origin permitido en upgrade WS (vacío = todos) |
+| server | `SYMBOL` | btcusdt | Símbolo |
+| server | `BINANCE_WS_URL` | wss://stream.binance.com:9443/ws | Spot; futuros: `wss://fstream.binance.com/ws` |
+| server | `BINANCE_REST_URL` | https://api.binance.com/api/v3 | Snapshot del libro y relleno de trades |
+| server | `RETENTION_MS` | 900000 | **Memoria** de trades, heatmap y CVD (15 min). Ver ADR 0005 para cuánto cuesta subirla |
+| server | `TRADES_MAX` | 100000 | Tope de seguridad de trades en memoria |
+| server | `BACKFILL` | true | Rellenar la memoria por REST al arrancar |
+| server | `DEPTH_STEP` | 1 | Tamaño del bucket de precio del heatmap |
+| server | `DEPTH_RANGE_PCT` | 0.001 | Rango del heatmap: mid ± fracción |
+| server | `DEPTH_INTERVAL_MS` | 1000 | Muestreo del libro (1 columna) |
+| server | `DEPTH_HISTORY` | `RETENTION_MS / DEPTH_INTERVAL_MS` | Columnas en memoria |
+| server | `DEPTH_SNAPSHOT_LIMIT` | 5000 | Niveles del snapshot REST |
+| server | `BAR_MS` | 60000 | Duración de cada barra footprint |
+| server | `BAR_HISTORY` | 60 | Barras cerradas conservadas |
+| server | `FOOTPRINT_TICK` | 1 | Tamaño del nivel de precio del footprint |
+| server | `IMBALANCE_RATIO` | 3 | Ratio de desequilibrio diagonal |
+| server | `IMBALANCE_MIN_VOL` | 0.05 | Volumen mínimo (activo base) para contar un desequilibrio |
+| server | `IMBALANCE_MIN_STACK` | 3 | Niveles consecutivos para "apilado" |
+| server | `ANALYSIS_LOOKBACK_MS` | 300000 | Ventana de tendencia de precio y CVD |
+| server | `ANALYSIS_RECENT_BARS` | 3 | Barras atrás que cuentan como "señal reciente" |
+| server | `PM_HISTORY` | 24 | Markets de Polymarket terminados guardados en memoria (24 × 5 min = 2 h) |
+| server | `PM_DB_PATH` | `data/polymarket.db` | SQLite: markets completos + todos los aggTrades y el heatmap (gitignored, crece sin límite) |
+| server | `PM_FEE_RATE`, `PM_SLIPPAGE`, `PM_MIN_EDGE`, `PM_EXIT_MARGIN`, `PM_BANKROLL`, `PM_KELLY_FRACTION`, `PM_MAX_STAKE_PCT`, `PM_MAX_MARKET_PCT`, `PM_MODEL_WEIGHT`, `PM_FLOW_GAIN`, `PM_WARMUP_S`, `PM_NO_ENTRY_S` | 0.05, 0.005, 0.04, 0.015, 1000, 0.25, 0.05, 0.1, 0.6, 0.3, 20, 10 | Parámetros del motor de señales (ver [signal-engine](../features/signal-engine.md)) |
+| server | `PM_LIVE_WS_URL`, `PM_BOOK_WS_URL`, `PM_GAMMA_URL`, `PM_SITE_URL` | URLs de Polymarket | Endpoints upstream |
+| server | `PM_TWAP_SECONDS` | 60 | Ventana del TWAP de Chainlink para price to beat y cierre |
+| server | `PM_CLOB_API_KEY`, `PM_CLOB_SECRET`, `PM_CLOB_PASSPHRASE` | (vacío) | Credenciales CLOB para el TWAP en vivo (PolyBolt). **Solo en `apps/server/.env.local`**; sin ellas se usa el spot del RTDS |
+| server | `PM_TWAP_WS_URL` | wss://ws-live-v2.polymarket.com/ws | Endpoint PolyBolt |
+| server | `PM_SYMBOL`, `PM_VARIANT`, `PM_SLUG_PREFIX`, `PM_MARKET_MS` | BTC, fiveminute, btc-updown-5m, 300000 | Activo/timeframe (solo BTC 5m soportado) |
+| web | `NEXT_PUBLIC_WS_URL` | ws://localhost:4000 | Base WS del servidor |
+
+## Verificación
+- `npm run typecheck`, `npm run test -w @updown/server` (detectores, motor y escenarios) y `npm run build`.
+- `GET /health` debe mostrar `ready: true`, `upstream: "connected"` y `depth.upstream: "connected"`; `memory` muestra cuánto hay guardado.
+- Probar un canal sin UI: `new WebSocket("ws://localhost:4000/ws/orderflow")` desde Node 22+ (el primer mensaje es el `snapshot`).
+- **Lógica de análisis nueva o cambiada ⇒ prueba unitaria** en `apps/server/src/analysis/analysis.test.ts` (son funciones puras, fáciles de probar).
+
+## Procesos en Windows
+`npm run dev` usa `tsx watch` y `next dev`. Si se mata solo el proceso que escucha el puerto, el *watcher* padre lo vuelve a levantar (y deja `EADDRINUSE` al reintentar). Detener el **árbol** (`taskkill /PID <padre> /T /F`, el padre se ve con `Get-CimInstance Win32_Process`). No ejecutar `next build` y `next dev` sobre la misma carpeta `.next` (borrar `apps/web/.next` si da `__webpack_modules__ … is not a function`).
+
+## UI (shadcn)
+Añadir componente: `cd apps/web && npx shadcn@latest add <nombre> --yes --overwrite`; revisar que los imports de `cn` apunten a `@/lib/utils` (ver ADR 0003).
+
+## Producción
+`npm run start -w @updown/server` (usa tsx) y `npm run build && npm run start -w @updown/web`. Definir `ALLOWED_ORIGIN` y `NEXT_PUBLIC_WS_URL` (wss://).

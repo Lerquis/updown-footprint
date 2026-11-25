@@ -1,0 +1,22 @@
+{
+  "name": "@updown/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch --env-file-if-exists=.env.local src/index.ts",
+    "build": "tsc --noEmit -p .",
+    "start": "tsx --env-file-if-exists=.env.local src/index.ts",
+    "typecheck": "tsc --noEmit -p .",
+    "test": "tsx --test \"src/**/*.test.ts\""
+  },
+  "dependencies": {
+    "@updown/protocol": "*",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.5.12",
+    "tsx": "^4.19.0"
+  }
+}

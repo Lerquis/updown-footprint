@@ -1,0 +1,17 @@
+{
+  "name": "updown-footprint",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": ["apps/*", "packages/*"],
+  "scripts": {
+    "dev": "npm-run-all --parallel dev:server dev:web",
+    "dev:server": "npm run dev -w @updown/server",
+    "dev:web": "npm run dev -w @updown/web",
+    "build": "npm run build -w @updown/server && npm run build -w @updown/web",
+    "typecheck": "npm run typecheck --workspaces --if-present"
+  },
+  "devDependencies": {
+    "npm-run-all2": "^7.0.0",
+    "typescript": "^5.6.0"
+  }
+}
