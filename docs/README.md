@@ -9,6 +9,7 @@ Cada hecho vive en **un solo** documento. Los demás lo enlazan.
 | [decisions/](decisions/) | ADRs: una decisión por archivo, `NNNN-titulo.md` | Se toma una decisión técnica relevante |
 | [features/](features/README.md) | Un doc por funcionalidad + estado | Se crea o modifica una feature |
 | [guides/development.md](guides/development.md) | Setup, comandos, variables de entorno, pruebas | Cambia el modo de ejecutar/operar |
+| [guides/deployment.md](guides/deployment.md) | Servidor en Railway, volumen de la base, backups/restauración en R2 | Cambia el despliegue o los backups |
 
 ## Reglas para la IA
 - **Leer**: este índice → el doc del área que tocas → el `CLAUDE.md` de la app.

@@ -25,6 +25,7 @@ El servidor es el **único consumidor** de datos de mercado y el **único dueño
 | `detectors.ts` | Funciones puras: desequilibrios, apilados, absorción, agotamiento, divergencia de CVD |
 | `SignalEngine` (`server/src/polymarket/strategy.ts`) + `model.ts` | Probabilidad de Up (precio, price to beat, tiempo, volatilidad, flujo) → señales de compra/venta con EV neto de comisión; ver [signal-engine](../features/signal-engine.md) |
 | `MarketStore` (`polymarket/store.ts`) + `rebuild.ts` | SQLite (`node:sqlite`): markets resueltos y completos, más todos los aggTrades y las columnas del heatmap en continuo; `rebuildOrderflow` rehace footprint/CVD/señales |
+| `DbBackup` (`backup/`) | Copia periódica de la base a S3/R2 y restauración al arrancar sin base ([deployment.md](../guides/deployment.md)) |
 | `AnalysisMonitor` + `scenarios.ts` | Tendencias de precio/CVD + señales recientes → escenarios activos, score y sesgo |
 | `Channel<M>` (`server/src/ws/channel.ts`) | Canal WS genérico: snapshot al conectar + broadcast. Una instancia por tipo de dato |
 | `index.ts` | Composición, tubería de trades, muestreos de 1 s, HTTP `/health`, enrutado de upgrade, check de Origin |

@@ -11,6 +11,7 @@ Node (ESM) + TypeScript + `ws`. Corre con `tsx` (dev y prod) porque `@updown/pro
 - `src/analysis/` — `engine.ts` (trades → barras footprint, CVD, señales), `detectors.ts` (funciones puras), `scenarios.ts` + `monitor.ts` (escenarios), `analysis.test.ts`.
 
 - `src/polymarket/` — clientes de Polymarket (`chainlinkTwapClient` (TWAP, con credenciales de `.env.local`), `chainlinkClient` (spot, respaldo), `bookClient`, `api` HTTP, sobre `ReconnectingWs`) y `tracker.ts` (rotación, muestreo, historial; con prueba). `model.ts` + `strategy.ts` (motor de señales, funciones puras con prueba en `strategy.test.ts`) y `store.ts` (SQLite `node:sqlite`: markets completos + aggTrades y heatmap continuos) y `rebuild.ts` (rehace footprint/CVD/señales desde los aggTrades). Al cambiar modelo, detectores o reglas, subir `ENGINE_VERSION`. `src/clock.ts`: reloj de Binance del servidor para alinear los markets.
+- `src/backup/` — `DbBackup` (VACUUM INTO en worker → gzip → R2/S3; restauración si falta la base), `s3.ts` (SigV4 sin dependencias, con prueba), `cli.ts` (`npm run backup`). Despliegue: `Dockerfile` + `railway.json` (contexto = raíz del repo), ver `docs/guides/deployment.md`.
 
 ## Convenciones
 - Imports relativos con extensión `.js` (ESM).

@@ -58,3 +58,4 @@ Añadir componente: `cd apps/web && npx shadcn@latest add <nombre> --yes --overw
 
 ## Producción
 `npm run start -w @updown/server` (usa tsx) y `npm run build && npm run start -w @updown/web`. Definir `ALLOWED_ORIGIN` y `NEXT_PUBLIC_WS_URL` (wss://).
+Servidor en la nube (Railway + volumen + backups `BACKUP_*` a R2, `npm run backup -w @updown/server`): [deployment.md](deployment.md).

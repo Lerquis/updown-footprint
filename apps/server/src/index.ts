@@ -31,6 +31,7 @@ import { PolymarketTracker } from "./polymarket/tracker.js";
 import { ENGINE_VERSION, MarketStore } from "./polymarket/store.js";
 import { DEFAULT_MODEL } from "./polymarket/model.js";
 import { DEFAULT_STRATEGY } from "./polymarket/strategy.js";
+import { DbBackup } from "./backup/backup.js";
 
 const SYMBOL = config.symbol.toUpperCase();
 
@@ -70,7 +71,12 @@ const chainlink: ChainlinkClient | ChainlinkTwapClient = hasClob
   ? new ChainlinkTwapClient(config.pmTwapWsUrl, config.pmClob)
   : new ChainlinkClient(config.pmLiveWsUrl);
 console.log(`[polymarket] price feed: ${hasClob ? "Chainlink TWAP 60s (PolyBolt)" : "Chainlink spot (RTDS, sin credenciales)"}`);
+// Backups a S3/R2 (solo si hay bucket configurado). Con PM_DB_RESTORE y sin base local, se descarga la ultima copia antes de abrirla.
+const bk = config.backup;
+const dbBackup = bk.s3.bucket && bk.s3.endpoint && bk.s3.accessKeyId && bk.s3.secretAccessKey ? new DbBackup(bk, config.pmDbPath) : null;
+if (dbBackup && bk.restore) await dbBackup.restoreIfMissing();
 const marketStore = new MarketStore(config.pmDbPath, SYMBOL);
+if (dbBackup && bk.enabled) dbBackup.start();
 const strategy = {
   ...DEFAULT_STRATEGY,
   model: { ...DEFAULT_MODEL, modelWeight: config.pmModelWeight, flowGain: config.pmFlowGain, twapSeconds: config.pmTwapSeconds },
@@ -320,8 +326,11 @@ const shutdown = () => {
   depthClient.stop();
   chainlink.stop();
   tracker.stop();
+  dbBackup?.stop();
   marketStore.close();
   http.close(() => process.exit(0));
+  // los WS abiertos mantienen vivo el servidor HTTP: la base ya esta cerrada, salir igualmente
+  setTimeout(() => process.exit(0), 3000).unref();
 };
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);

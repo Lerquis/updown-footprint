@@ -72,6 +72,23 @@ export const config = {
   /** Base de datos SQLite de markets completos (relativa al directorio del servidor) */
   pmDbPath: process.env.PM_DB_PATH ?? "data/polymarket.db",
 
+  // ── Backups de la base a un bucket S3/R2 (ver docs/guides/deployment.md). Desactivado si falta el bucket. ──
+  backup: {
+    s3: {
+      endpoint: process.env.BACKUP_S3_ENDPOINT ?? "",
+      bucket: process.env.BACKUP_S3_BUCKET ?? "",
+      accessKeyId: process.env.BACKUP_S3_ACCESS_KEY_ID ?? "",
+      secretAccessKey: process.env.BACKUP_S3_SECRET_ACCESS_KEY ?? "",
+      region: process.env.BACKUP_S3_REGION ?? "auto",
+    },
+    prefix: process.env.BACKUP_PREFIX ?? "updown/",
+    intervalMs: num(process.env.BACKUP_INTERVAL_H, 24) * 3600_000,
+    /** Programar backups periodicos (false: solo restaurar / backups manuales) */
+    enabled: bool(process.env.BACKUP_ENABLED, true),
+    /** Al arrancar sin base, descargar el ultimo backup */
+    restore: bool(process.env.PM_DB_RESTORE, false),
+  },
+
   // ── Motor de senales (ver docs/features/signal-engine.md) ──
   /** Comision de taker del market (0.05 en BTC 5m/15m, segun docs.polymarket.com/trading/fees) */
   pmFeeRate: num(process.env.PM_FEE_RATE, 0.05),

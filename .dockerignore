@@ -1,0 +1,11 @@
+**/node_modules
+**/.next
+**/dist
+**/*.log
+**/.env
+**/.env.local
+**/.env.*.local
+.git
+.claude
+apps/server/data
+apps/web/tsconfig.tsbuildinfo

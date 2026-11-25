@@ -8,7 +8,8 @@
     "build": "tsc --noEmit -p .",
     "start": "tsx --env-file-if-exists=.env.local src/index.ts",
     "typecheck": "tsc --noEmit -p .",
-    "test": "tsx --test \"src/**/*.test.ts\""
+    "test": "tsx --test \"src/**/*.test.ts\"",
+    "backup": "tsx --env-file-if-exists=.env.local src/backup/cli.ts"
   },
   "dependencies": {
     "@updown/protocol": "*",
