@@ -1,21 +1,22 @@
 "use client";
 
 import { memo, useMemo, useState } from "react";
-import type { PmDecision, PmEngineThresholds, PmRecord, PmSideDecision } from "@updown/protocol";
+import type { PmDecision, PmEngineId, PmEngineThresholds, PmMarketRow, PmSideDecision } from "@updown/protocol";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { actionKey, BLOCK_HELP, BLOCK_LABEL, cents, edgeCents, paperNet, pct, signalLabel, stateKey } from "@/lib/engines";
+import { actionKey, BLOCK_HELP, BLOCK_LABEL, cents, edgeCents, ENGINE_DESC, ENGINE_IDS, ENGINE_LABEL, pct, signalLabel, stateKey } from "@/lib/engines";
 import { fmtClockHM } from "@/lib/flow";
 import type { EnginesView } from "@/lib/useEngines";
 
 const ROWS = 60;
+const RECENT = 24;
 const money = (v: number | null) => (v === null ? "–" : `${v > 0 ? "+" : ""}${v.toFixed(2)}`);
 const cls = (v: number | null) => (v === null || v === 0 ? "" : v > 0 ? "text-buy" : "text-sell");
 
-/** Una linea "Comprar Up: +2.1¢ (umbral 4¢) · EV bajo" */
+/** Una linea "Comprar Up: +2.1¢ / +4.0¢ · EV bajo" */
 function Verdict({ label, edge, block, threshold }: { label: string; edge: number | null; block: PmSideDecision["buy"]; threshold: number }) {
   const ok = block === "ok";
   return (
@@ -31,29 +32,25 @@ function Verdict({ label, edge, block, threshold }: { label: string; edge: numbe
 }
 
 /** Estado en vivo de un motor: ultima decision y sus razones. */
-function EngineCard({ title, hint, d, trades, th }: { title: string; hint: string; d: PmDecision | undefined; trades: number; th: PmEngineThresholds }) {
+function EngineCard({ id, hint, d, trades, th }: { id: PmEngineId; hint: string; d: PmDecision | undefined; trades: number; th: PmEngineThresholds }) {
   return (
     <div className="flex flex-col gap-2 rounded-md border p-3 text-xs">
-      <div className="flex items-baseline justify-between">
-        <span className="font-medium">{title}</span>
+      <div className="flex flex-col">
+        <span className="font-medium">{ENGINE_LABEL[id]}</span>
         <span className="text-[11px] text-muted-foreground">{hint}</span>
       </div>
       {!d ? (
         <p className="text-muted-foreground">Sin decisiones todavía.</p>
       ) : (
         <>
-          <div className="flex items-end gap-4">
-            <div>
-              <div className="text-[11px] text-muted-foreground">P(Up) decide</div>
-              <div className="font-mono text-lg font-semibold text-violet-400">{pct(d.pUp)}</div>
-            </div>
+          <div>
+            <div className="text-[11px] text-muted-foreground">P(Up) con que decide</div>
+            <div className="font-mono text-lg font-semibold text-violet-400">{pct(d.pUp)}</div>
             <div className="font-mono text-[11px] text-muted-foreground">
-              modelo {pct(d.pModel)} · mercado {pct(d.pMarket)}
-              <br />
-              faltan {d.tau.toFixed(0)}s · Chainlink {d.chainlink?.toFixed(2) ?? "–"}
+              modelo {pct(d.pModel)} · mercado {pct(d.pMarket)} · faltan {d.tau.toFixed(0)}s
             </div>
           </div>
-          <div className="grid grid-cols-2 gap-x-3 font-mono text-[11px]">
+          <div className="flex flex-col font-mono text-[11px]">
             <span className="text-buy">
               Up {cents(d.upBid)}/{cents(d.upAsk)} · {d.up.shares} tk
             </span>
@@ -80,8 +77,7 @@ function EngineCard({ title, hint, d, trades, th }: { title: string; hint: strin
 function Cell({ d }: { d: PmDecision | undefined }) {
   if (!d) return <span className="text-muted-foreground">–</span>;
   if (d.signals.length) return <b className={d.signals[0]!.side === "up" ? "text-buy" : "text-sell"}>{d.signals.map(signalLabel).join(", ")}</b>;
-  const side = (n: string, s: PmSideDecision) =>
-    s.sell !== "flat" ? `${n} vender ${edgeCents(s.sellEdge)} ${BLOCK_LABEL[s.sell]}` : `${n} ${edgeCents(s.buyEdge)} ${BLOCK_LABEL[s.buy]}`;
+  const side = (n: string, s: PmSideDecision) => (s.sell !== "flat" ? `${n} vender ${edgeCents(s.sellEdge)} ${BLOCK_LABEL[s.sell]}` : `${n} ${edgeCents(s.buyEdge)} ${BLOCK_LABEL[s.buy]}`);
   return (
     <span className="text-muted-foreground">
       {side("Up", d.up)} · {side("Dn", d.down)}
@@ -89,41 +85,40 @@ function Cell({ d }: { d: PmDecision | undefined }) {
   );
 }
 
-interface Row {
-  sec: number;
-  a?: PmDecision;
-  b?: PmDecision;
-  diffAction: boolean;
-  diffState: boolean;
-}
+type Row = { sec: number; d: Partial<Record<PmEngineId, PmDecision>>; diffAction: boolean; diffState: boolean };
 
-const Timeline = memo(function Timeline({ a, b, start }: { a: PmDecision[]; b: PmDecision[]; start: number }) {
+const Timeline = memo(function Timeline({ decisions, start }: { decisions: Record<PmEngineId, PmDecision[]>; start: number }) {
   const [onlyDiff, setOnlyDiff] = useState(false);
   const [all, setAll] = useState(false);
   const rows = useMemo(() => {
-    // A muestrea en un instante cualquiera del segundo; se empareja con la decision de B del segundo mas cercano
+    // los tres motores deciden sobre el mismo segundo T de Binance (cada uno con su retraso)
     const map = new Map<number, Row>();
-    const get = (sec: number) => map.get(sec) ?? (map.set(sec, { sec, diffAction: false, diffState: false }), map.get(sec)!);
-    for (const d of a) get(Math.round(d.time / 1000)).a = d;
-    for (const d of b) get(Math.round(d.time / 1000)).b = d;
+    for (const id of ENGINE_IDS)
+      for (const d of decisions[id]) {
+        const sec = Math.round(d.time / 1000);
+        const r = map.get(sec) ?? { sec, d: {}, diffAction: false, diffState: false };
+        r.d[id] = d;
+        map.set(sec, r);
+      }
     const out = [...map.values()].sort((x, y) => y.sec - x.sec);
     for (const r of out) {
-      if (!r.a || !r.b) continue; // solo se compara cuando ambos decidieron ese segundo
-      r.diffAction = actionKey(r.a) !== actionKey(r.b);
-      r.diffState = !r.diffAction && stateKey(r.a) !== stateKey(r.b);
+      const present = ENGINE_IDS.map((id) => r.d[id]).filter((d): d is PmDecision => !!d);
+      if (present.length < 2) continue; // solo se compara cuando al menos dos decidieron ese segundo
+      r.diffAction = new Set(present.map(actionKey)).size > 1;
+      r.diffState = !r.diffAction && new Set(present.map(stateKey)).size > 1;
     }
     return out;
-  }, [a, b]);
-  const both = rows.filter((r) => r.a && r.b);
-  const sameActions = both.filter((r) => !r.diffAction).length;
-  const sameState = both.filter((r) => !r.diffAction && !r.diffState).length;
+  }, [decisions]);
+  const full = rows.filter((r) => ENGINE_IDS.every((id) => r.d[id]));
+  const sameActions = full.filter((r) => !r.diffAction).length;
+  const sameState = full.filter((r) => !r.diffAction && !r.diffState).length;
   const shown = (onlyDiff ? rows.filter((r) => r.diffAction || r.diffState) : rows).slice(0, all ? undefined : ROWS);
 
   return (
     <div className="flex flex-col gap-2">
       <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-muted-foreground">
         <span>
-          Segundos comparados: {both.length} · misma acción {sameActions} · misma evaluación completa {sameState}
+          Segundos con los 3 motores: {full.length} · misma acción {sameActions} · misma evaluación completa {sameState}
         </span>
         <label className="flex items-center gap-1.5">
           <Switch size="sm" checked={onlyDiff} onCheckedChange={setOnlyDiff} /> Solo diferencias
@@ -134,24 +129,23 @@ const Timeline = memo(function Timeline({ a, b, start }: { a: PmDecision[]; b: P
           <TableHeader>
             <TableRow>
               <TableHead className="w-12">Seg.</TableHead>
-              <TableHead className="w-14 text-right">A P(Up)</TableHead>
-              <TableHead>A decide</TableHead>
-              <TableHead className="w-14 text-right">B P(Up)</TableHead>
-              <TableHead>B decide</TableHead>
+              {ENGINE_IDS.map((id) => (
+                <TableHead key={id}>
+                  {ENGINE_LABEL[id]} <span className="font-normal text-muted-foreground">P(Up) · decide</span>
+                </TableHead>
+              ))}
             </TableRow>
           </TableHeader>
           <TableBody>
             {shown.map((r) => (
               <TableRow key={r.sec} className={r.diffAction ? "bg-yellow-500/15" : r.diffState ? "bg-yellow-500/5" : ""}>
                 <TableCell className="font-mono">+{Math.round((r.sec * 1000 - start) / 1000)}s</TableCell>
-                <TableCell className="text-right font-mono">{pct(r.a?.pUp ?? null)}</TableCell>
-                <TableCell className="text-[11px]">
-                  <Cell d={r.a} />
-                </TableCell>
-                <TableCell className="text-right font-mono">{pct(r.b?.pUp ?? null)}</TableCell>
-                <TableCell className="text-[11px]">
-                  <Cell d={r.b} />
-                </TableCell>
+                {ENGINE_IDS.map((id) => (
+                  <TableCell key={id} className="text-[11px] whitespace-normal">
+                    <span className="mr-1 font-mono">{pct(r.d[id]?.pUp ?? null)}</span>
+                    <Cell d={r.d[id]} />
+                  </TableCell>
+                ))}
               </TableRow>
             ))}
           </TableBody>
@@ -167,51 +161,44 @@ const Timeline = memo(function Timeline({ a, b, start }: { a: PmDecision[]; b: P
 });
 
 /**
- * Drawer de comparacion de motores: A (principal, el que se guarda) y B (sincronizado, solo en memoria).
- * Muestra la ultima decision de cada uno con sus razones, la linea de tiempo segundo a segundo y el resultado
- * de papel de ambos en los markets recientes.
+ * Drawer de comparacion de motores A, B y C: la ultima decision de cada uno con sus razones, la linea de tiempo
+ * segundo a segundo del market en curso, y el resultado de papel de los tres en los markets guardados recientes.
  */
 export function EnginesDrawer({
   open,
   onOpenChange,
   eng,
-  history,
+  rows,
   marketStart,
 }: {
   open: boolean;
   onOpenChange: (v: boolean) => void;
   eng: EnginesView;
-  history: PmRecord[];
+  /** markets guardados (de la API), mas recientes primero */
+  rows: PmMarketRow[];
   /** inicio del market en curso (para los segundos relativos) */
   marketStart: number;
 }) {
   const th = eng.thresholds;
-  const lastA = eng.a.decisions[eng.a.decisions.length - 1];
-  const lastB = eng.b.decisions[eng.b.decisions.length - 1];
-  const sameMarket = eng.a.slug !== null && eng.a.slug === eng.b.slug;
-
-  const recent = useMemo(() => {
-    const bBySlug = new Map(eng.bHistory.map((h) => [h.slug, h.trades]));
-    return history
-      .filter((r) => bBySlug.has(r.market.slug))
-      .slice()
-      .reverse()
-      .map((r) => {
-        const bt = bBySlug.get(r.market.slug)!;
-        return { slug: r.market.slug, start: r.market.start, result: r.market.result, aOps: r.trades.length, aNet: r.pnl.net, bOps: bt.length, bNet: paperNet(bt, r.market.result) };
-      });
-  }, [eng.bHistory, history]);
-  const tot = recent.reduce((s, r) => ({ a: s.a + (r.aNet ?? 0), b: s.b + (r.bNet ?? 0) }), { a: 0, b: 0 });
+  const delay = (id: PmEngineId) => eng.info.find((e) => e.id === id);
+  // solo las decisiones del market en curso (un motor puede ir un segundo por delante al rotar)
+  const cur = ENGINE_IDS.map((id) => eng.tracks[id].slug).find((s) => s !== null) ?? null;
+  const decisions = useMemo(
+    () => Object.fromEntries(ENGINE_IDS.map((id) => [id, eng.tracks[id].slug === cur ? eng.tracks[id].decisions : []])) as Record<PmEngineId, PmDecision[]>,
+    [eng.tracks, cur],
+  );
+  const recent = rows.slice(0, RECENT);
+  const tot = Object.fromEntries(ENGINE_IDS.map((id) => [id, recent.reduce((s, r) => s + (r.engines[id].net ?? 0), 0)])) as Record<PmEngineId, number>;
 
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
-      <SheetContent className="w-full overflow-y-auto sm:max-w-3xl">
+      <SheetContent className="w-full overflow-y-auto sm:max-w-5xl">
         <SheetHeader>
-          <SheetTitle>Motores A y B</SheetTitle>
+          <SheetTitle>Motores A, B y C</SheetTitle>
           <SheetDescription>
-            <b>A</b>: el motor principal (muestrea con el reloj del servidor; es el que se guarda en la base). <b>B</b>: mismas reglas, pero decide en el
-            segundo exacto de Binance (+{eng.syncDelayMs} ms) con los datos que había en ese instante, para que servidores distintos decidan lo mismo. B solo
-            vive en memoria.
+            Mismas reglas, una decisión por segundo de Binance, en distinto instante y con distintos datos. <b>A</b>: justo al empezar el segundo, con lo último
+            recibido. <b>B</b> y <b>C</b>: esperan {delay("b")?.delayMs ?? 300} ms y {delay("c")?.delayMs ?? 150} ms y usan solo datos con marca de tiempo de ese
+            segundo, para que servidores distintos decidan lo mismo. Los tres se guardan en la base.
           </SheetDescription>
         </SheetHeader>
         <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
@@ -225,22 +212,34 @@ export function EnginesDrawer({
         </div>
 
         {th && (
-          <div className="grid gap-2 sm:grid-cols-2">
-            <EngineCard title="A · principal" hint={lastA ? `decide en +${(lastA.time % 1000) / 1000}s del segundo` : ""} d={lastA} trades={eng.a.trades.length} th={th} />
-            <EngineCard title="B · sincronizado" hint={`segundo exacto +${eng.syncDelayMs} ms`} d={sameMarket || !lastA ? lastB : undefined} trades={eng.b.trades.length} th={th} />
+          <div className="grid gap-2 lg:grid-cols-3">
+            {ENGINE_IDS.map((id) => {
+              const info = delay(id);
+              const ds = decisions[id];
+              return (
+                <EngineCard
+                  key={id}
+                  id={id}
+                  hint={info ? `${info.mode === "live" ? "lo último recibido" : "datos a fecha"} · segundo + ${info.delayMs} ms` : ENGINE_DESC[id]}
+                  d={ds[ds.length - 1]}
+                  trades={ds.reduce((n, d) => n + d.signals.length, 0)}
+                  th={th}
+                />
+              );
+            })}
           </div>
         )}
 
         <h3 className="mt-1 text-sm font-medium">Segundo a segundo (market en curso)</h3>
         <p className="-mt-2 text-[11px] text-muted-foreground">
-          Amarillo fuerte: A y B hicieron algo distinto. Amarillo suave: misma acción pero distinta evaluación (p. ej. uno &quot;EV bajo&quot; y otro &quot;espera&quot;). Edge
-          en ¢ por token frente al umbral.
+          Amarillo fuerte: algún motor hizo algo distinto. Amarillo suave: misma acción pero distinta evaluación (p. ej. uno &quot;EV bajo&quot; y otro
+          &quot;espera&quot;). Edge en ¢ por token frente al umbral.
         </p>
-        <Timeline a={eng.a.decisions} b={sameMarket ? eng.b.decisions : []} start={marketStart} />
+        <Timeline decisions={decisions} start={marketStart} />
 
-        <h3 className="mt-2 text-sm font-medium">Markets recientes: A vs B</h3>
+        <h3 className="mt-2 text-sm font-medium">Markets guardados recientes</h3>
         {recent.length === 0 ? (
-          <p className="text-[11px] text-muted-foreground">Aún no hay markets terminados con el motor B (se acumulan desde que arrancó el servidor; no se guardan).</p>
+          <p className="text-[11px] text-muted-foreground">Aún no hay markets guardados.</p>
         ) : (
           <div className="rounded-md border">
             <Table>
@@ -248,32 +247,34 @@ export function EnginesDrawer({
                 <TableRow>
                   <TableHead>Market</TableHead>
                   <TableHead>Resultado</TableHead>
-                  <TableHead className="text-right">A ops</TableHead>
-                  <TableHead className="text-right">A neto</TableHead>
-                  <TableHead className="text-right">B ops</TableHead>
-                  <TableHead className="text-right">B neto</TableHead>
+                  {ENGINE_IDS.map((id) => (
+                    <TableHead key={id} className="text-right">
+                      {ENGINE_LABEL[id]} ops · neto
+                    </TableHead>
+                  ))}
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {recent.map((r) => (
                   <TableRow key={r.slug}>
                     <TableCell className="font-mono">{fmtClockHM(r.start)}</TableCell>
-                    <TableCell className={r.result === "up" ? "text-buy" : r.result === "down" ? "text-sell" : "text-muted-foreground"}>
-                      {r.result === "up" ? "▲ Up" : r.result === "down" ? "▼ Down" : "…"}
-                    </TableCell>
-                    <TableCell className="text-right font-mono">{r.aOps}</TableCell>
-                    <TableCell className={`text-right font-mono ${cls(r.aNet)}`}>{money(r.aNet)}</TableCell>
-                    <TableCell className="text-right font-mono">{r.bOps}</TableCell>
-                    <TableCell className={`text-right font-mono ${cls(r.bNet)}`}>{money(r.bNet)}</TableCell>
+                    <TableCell className={r.result === "up" ? "text-buy" : "text-sell"}>{r.result === "up" ? "▲ Up" : "▼ Down"}</TableCell>
+                    {ENGINE_IDS.map((id) => (
+                      <TableCell key={id} className="text-right font-mono">
+                        {r.engines[id].trades} · <span className={cls(r.engines[id].net)}>{money(r.engines[id].net)}</span>
+                      </TableCell>
+                    ))}
                   </TableRow>
                 ))}
                 <TableRow>
-                  <TableCell colSpan={3} className="text-muted-foreground">
+                  <TableCell colSpan={2} className="text-muted-foreground">
                     Total ({recent.length})
                   </TableCell>
-                  <TableCell className={`text-right font-mono ${cls(tot.a)}`}>{money(tot.a)}</TableCell>
-                  <TableCell />
-                  <TableCell className={`text-right font-mono ${cls(tot.b)}`}>{money(tot.b)}</TableCell>
+                  {ENGINE_IDS.map((id) => (
+                    <TableCell key={id} className={`text-right font-mono ${cls(tot[id])}`}>
+                      {money(tot[id])}
+                    </TableCell>
+                  ))}
                 </TableRow>
               </TableBody>
             </Table>

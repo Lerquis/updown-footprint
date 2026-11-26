@@ -39,7 +39,7 @@ test("slotStart alinea a la ventana", () => {
 });
 
 test("buildRecord recorta barras y CVD a la ventana", () => {
-  const rec = buildRecord(market(T0), [] as PmPoint[], flow);
+  const rec = buildRecord(market(T0), { a: { points: [] as PmPoint[], trades: [] }, b: { points: [], trades: [] }, c: { points: [], trades: [] } }, flow);
   assert.deepEqual(rec.bars.map((b) => b.start), [T0, T0 + 60_000]);
   assert.deepEqual(rec.cvd.map((p) => p.cvd), [1, 2]);
 });
@@ -62,26 +62,34 @@ test("el tracker rota, archiva y resuelve el market", async () => {
   tr.on("record", (r) => records.push(r));
   const settle = () => new Promise((r) => setImmediate(r));
 
-  tr.setChainlink(100.5);
+  // el tracker ya no muestrea: recibe los pasos de los motores (aqui, dos del A y uno del B)
+  const pt = (t: number): PmPoint => ({ time: t, chainlink: 100.5, upBid: 0.5, upAsk: 0.51, downBid: 0.49, downAsk: 0.5, binance: 1, basis: 0, sigma: 1, flow: 0, pModel: 0.5 });
   tr.tick(T0 + 1000);
   await settle();
   tr.tick(T0 + 2000);
+  const slug0 = tr.current!.slug;
+  tr.addStep("a", slug0, pt(T0 + 1000), []);
+  tr.addStep("a", slug0, pt(T0 + 2000), []);
+  tr.addStep("b", slug0, pt(T0 + 2000), []);
   assert.equal(tr.current?.start, T0);
   assert.equal(tr.current?.upToken, "u");
   assert.equal(tr.current?.priceToBeat, 100);
   assert.equal(tr.next?.start, T0 + M);
   assert.equal(tr.points.length, 2);
   assert.equal(tr.points.at(-1)?.chainlink, 100.5);
+  assert.equal(tr.live("b").points.length, 1);
   assert.equal(books, 1);
 
   tr.tick(T0 + M + 1000); // rota
   assert.equal(tr.current?.start, T0 + M);
-  assert.equal(tr.points.length, 1);
+  assert.equal(tr.points.length, 0); // market nuevo, sin pasos aun
   assert.equal(records.length, 0); // aun en periodo de gracia
 
   tr.tick(T0 + M + 6000);
   assert.equal(records.length, 1);
   assert.equal(records[0]!.market.status, "resolving");
+  assert.equal(records[0]!.points.length, 2);
+  assert.equal(records[0]!.engines?.b?.points.length, 1);
   await settle();
   tr.tick(T0 + M + 7000);
   await settle();

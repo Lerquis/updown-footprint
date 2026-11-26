@@ -1,14 +1,16 @@
 import { EventEmitter } from "node:events";
-import type { AggTrade, CvdPoint, OrderflowSignal, PmDecision, PmEngineMarket, PmMarket, PmPoint, PmSignal } from "@updown/protocol";
+import type { AggTrade, CvdPoint, OrderflowSignal, PmDecision, PmEngineId, PmMarket, PmPoint, PmSignal } from "@updown/protocol";
 import { estimateSigma, flowScore, recentAvg } from "./model.js";
 import { DEFAULT_STRATEGY, SignalEngine, type StrategyConfig } from "./strategy.js";
 
 /**
- * Motor B ("sincronizado"): las mismas reglas que el motor principal (A), pero decide en el segundo exacto `T`
- * del reloj de Binance usando solo datos "a fecha" de `T`: el ultimo precio de cada token y de Chainlink con
- * marca de tiempo <= T, y un CVD propio construido con los aggTrades de tiempo < T. Asi dos servidores en
- * lugares distintos ven la misma foto y deberian decidir lo mismo. Solo en memoria (no se guarda en la base).
- * Ver docs/features/signal-engine.md.
+ * Motores de senales cronometrados con el reloj de Binance (A, B y C). Todos aplican las mismas reglas
+ * (`SignalEngine`) una vez por segundo `T` de Binance, en `T + delayMs`, y se diferencian en que datos usan:
+ * - `live` (A): lo ultimo recibido del libro y de Chainlink en ese instante (lo mas rapido; depende de la latencia).
+ * - `asOf` (B, C): solo datos con marca de tiempo <= T (Polymarket y Chainlink marcan cada mensaje), para que
+ *   servidores en lugares distintos vean la misma foto si los datos llegan antes de `delayMs`.
+ * Binance: cada motor arma su propio CVD de 1 s con los aggTrades de tiempo < T (`SecondCvd`).
+ * Ver docs/features/engines.md.
  */
 
 interface Stamped<T> {
@@ -30,7 +32,7 @@ export class AsOf<T> {
     }
   }
 
-  /** Ultimo valor con time <= t (o undefined) */
+  /** Ultimo valor con time <= t (o undefined). Con t = Infinity, el mas reciente recibido. */
   at(t: number): T | undefined {
     const a = this.items;
     for (let i = a.length - 1; i >= 0; i--) if (a[i]!.time <= t) return a[i]!.v;
@@ -43,9 +45,34 @@ export class AsOf<T> {
     while (n + 1 < this.items.length && this.items[n + 1]!.time <= cutoff) n++;
     if (n) this.items.splice(0, n);
   }
+}
 
-  clear(): void {
-    this.items = [];
+/** Datos de Polymarket compartidos por los motores: cotizaciones por token y precio de Chainlink, con su marca de tiempo. */
+export class PmFeed {
+  readonly quotes = new Map<string, AsOf<{ bid: number | null; ask: number | null }>>();
+  readonly chainlink = new AsOf<number>();
+
+  onChainlink(time: number, value: number): void {
+    this.chainlink.push(time < 1e12 ? time * 1000 : time, value);
+  }
+
+  onQuote(token: string, bid: number | null, ask: number | null, time: number): void {
+    let q = this.quotes.get(token);
+    if (!q) this.quotes.set(token, (q = new AsOf()));
+    q.push(time, { bid, ask });
+  }
+
+  quote(token: string, t: number) {
+    return this.quotes.get(token)?.at(t);
+  }
+
+  /** Olvida historia vieja (conserva el valor vigente) y los tokens que ya no se usan. */
+  prune(cutoff: number, keepTokens: Set<string>): void {
+    this.chainlink.prune(cutoff);
+    for (const [token, q] of this.quotes) {
+      if (!keepTokens.has(token)) this.quotes.delete(token);
+      else q.prune(cutoff);
+    }
   }
 }
 
@@ -104,35 +131,43 @@ export class SecondCvd {
   }
 }
 
-export interface SyncEngineEvents {
-  decision: [string, PmDecision];
-  /** el motor termino un market (sus operaciones, para el historial en memoria) */
-  market: [PmEngineMarket];
+/** Lo que produce un motor en un segundo: la muestra ("foto"), las senales y el porque */
+export interface EngineStep {
+  slug: string;
+  point: PmPoint;
+  signals: PmSignal[];
+  decision: PmDecision;
 }
 
-export interface SyncEngineOptions {
+export interface TimedEngineEvents {
+  step: [EngineStep];
+}
+
+export interface TimedEngineOptions {
+  id: PmEngineId;
+  mode: "live" | "asOf";
+  /** ms tras el inicio del segundo de Binance en que decide */
+  delayMs: number;
   strategy?: StrategyConfig;
-  /** memoria de trades/CVD (debe cubrir la volatilidad y la ventana TWAP; igual que RETENTION_MS) */
+  /** memoria de CVD (debe cubrir la volatilidad y la ventana TWAP; igual que RETENTION_MS) */
   retentionMs: number;
-  /** markets terminados cuyas operaciones se recuerdan */
-  historyMax: number;
-  /** decisiones del market en curso que se conservan */
+  /** decisiones del market en curso que se conservan (para el canal engines) */
   decisionsMax: number;
 }
 
-export class SyncEngine extends EventEmitter<SyncEngineEvents> {
-  private readonly quotes = new Map<string, AsOf<{ bid: number | null; ask: number | null }>>();
-  private readonly chainlink = new AsOf<number>();
+export class TimedEngine extends EventEmitter<TimedEngineEvents> {
   private readonly cvd: SecondCvd;
   private market: PmMarket | null = null;
   private engine?: SignalEngine;
   private basisEma: number | null = null;
   private lastT = 0;
+  /** decisiones del market en curso (para el canal engines) */
   decisions: PmDecision[] = [];
-  trades: PmSignal[] = [];
-  readonly history: PmEngineMarket[] = [];
 
-  constructor(private readonly opts: SyncEngineOptions) {
+  constructor(
+    readonly opts: TimedEngineOptions,
+    private readonly feed: PmFeed,
+  ) {
     super();
     this.cvd = new SecondCvd(opts.retentionMs);
   }
@@ -145,38 +180,31 @@ export class SyncEngine extends EventEmitter<SyncEngineEvents> {
     this.cvd.add(t);
   }
 
-  onChainlink(time: number, value: number): void {
-    this.chainlink.push(time < 1e12 ? time * 1000 : time, value);
-  }
-
-  onQuote(token: string, bid: number | null, ask: number | null, time: number): void {
-    let q = this.quotes.get(token);
-    if (!q) this.quotes.set(token, (q = new AsOf()));
-    q.push(time, { bid, ask });
-  }
-
   /**
    * Decide el segundo `T` (multiplo de 1000, reloj de Binance) del market que contenga `T`.
-   * `signals`: senales de footprint (las de tiempo > T se ignoran). Devuelve la decision o null si no hay market.
+   * `signals`: senales de footprint (las de tiempo > T se ignoran). Devuelve el paso o null si no hay market.
    */
-  step(T: number, market: PmMarket | null, signals: OrderflowSignal[]): PmDecision | null {
+  step(T: number, market: PmMarket | null, signals: OrderflowSignal[]): EngineStep | null {
     if (T <= this.lastT) return null;
     this.lastT = T;
     this.cvd.closeTo(T);
-    this.chainlink.prune(T - 60_000);
-    for (const q of this.quotes.values()) q.prune(T - 60_000);
     if (!market || T < market.start || T >= market.end) return null;
-    if (this.market?.slug !== market.slug) this.rotate(market);
+    if (this.market?.slug !== market.slug) {
+      this.market = market;
+      this.engine = new SignalEngine(market, this.opts.strategy ?? DEFAULT_STRATEGY);
+      this.decisions = [];
+    }
 
     const cfg = this.opts.strategy ?? DEFAULT_STRATEGY;
+    const at = this.opts.mode === "live" ? Infinity : T;
     const cvd = this.cvd.points;
     const last = cvd[cvd.length - 1];
-    const chain = this.chainlink.at(T) ?? null;
+    const chain = this.feed.chainlink.at(at) ?? null;
     const avg = recentAvg(cvd, T, cfg.model.twapSeconds);
     const basis = chain !== null && avg !== null ? chain - avg : null;
     if (basis !== null) this.basisEma = this.basisEma === null ? basis : this.basisEma + (1 - Math.pow(0.5, 1 / 60)) * (basis - this.basisEma);
-    const up = this.quotes.get(market.upToken)?.at(T);
-    const down = this.quotes.get(market.downToken)?.at(T);
+    const up = this.feed.quote(market.upToken, at);
+    const down = this.feed.quote(market.downToken, at);
     const point: PmPoint = {
       time: T,
       chainlink: chain,
@@ -191,25 +219,37 @@ export class SyncEngine extends EventEmitter<SyncEngineEvents> {
       pModel: null,
     };
     const r = this.engine!.step(point);
-    this.trades.push(...r.signals);
+    point.pModel = r.pUp;
     this.decisions.push(r.decision);
     if (this.decisions.length > this.opts.decisionsMax) this.decisions.shift();
-    this.emit("decision", market.slug, r.decision);
-    return r.decision;
+    const out: EngineStep = { slug: market.slug, point, signals: r.signals, decision: r.decision };
+    this.emit("step", out);
+    return out;
   }
+}
 
-  private rotate(market: PmMarket): void {
-    if (this.market) {
-      const done: PmEngineMarket = { slug: this.market.slug, trades: this.trades };
-      this.history.push(done);
-      if (this.history.length > this.opts.historyMax) this.history.shift();
-      this.emit("market", done);
-      // las cotizaciones son por token: las del market anterior ya no sirven
-      for (const t of [this.market.upToken, this.market.downToken]) this.quotes.delete(t);
+/**
+ * Programa un motor: un paso por segundo de Binance, `delayMs` despues de que empiece el segundo siguiente.
+ * Recupera segundos si el timer se retrasa (hasta 5). Devuelve la funcion para detenerlo.
+ */
+export function scheduleEngine(
+  engine: TimedEngine,
+  now: () => number,
+  run: (T: number) => void,
+  enabled: () => boolean,
+): () => void {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let lastT = 0;
+  const d = engine.opts.delayMs;
+  const loop = () => {
+    const T = Math.floor((now() - d) / 1000) * 1000;
+    if (enabled()) {
+      if (!lastT || T - lastT > 5000) lastT = T - 1000;
+      for (let t = lastT + 1000; t <= T; t += 1000) run(t);
+      lastT = T;
     }
-    this.market = market;
-    this.engine = new SignalEngine(market, this.opts.strategy ?? DEFAULT_STRATEGY);
-    this.decisions = [];
-    this.trades = [];
-  }
+    timer = setTimeout(loop, Math.max(5, T + 1000 + d - now()));
+  };
+  loop();
+  return () => clearTimeout(timer);
 }

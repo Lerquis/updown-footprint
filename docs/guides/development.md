@@ -35,9 +35,9 @@ Copiar `apps/*/.env.example` a `.env` / `.env.local` si se quiere cambiar la con
 | server | `ANALYSIS_LOOKBACK_MS` | 300000 | Ventana de tendencia de precio y CVD |
 | server | `ANALYSIS_RECENT_BARS` | 3 | Barras atrás que cuentan como "señal reciente" |
 | server | `PM_HISTORY` | 24 | Markets de Polymarket terminados guardados en memoria (24 × 5 min = 2 h) |
-| server | `PM_DB_PATH` | `data/polymarket.db` | SQLite: markets completos + todos los aggTrades y el heatmap (gitignored, crece sin límite) |
+| server | `PM_DB_PATH` | `data/polymarket.db` | SQLite: markets completos + todos los aggTrades y el heatmap (gitignored, crece sin límite). Se usa con la generación: `data/polymarket-v2.db`; la base sin sufijo es la generación anterior (se archiva una vez en R2, [ADR 0011](../decisions/0011-tres-motores-guardados-y-base-v2.md)) |
 | server | `PM_FEE_RATE`, `PM_SLIPPAGE`, `PM_MIN_EDGE`, `PM_EXIT_MARGIN`, `PM_BANKROLL`, `PM_KELLY_FRACTION`, `PM_MAX_STAKE_PCT`, `PM_MAX_MARKET_PCT`, `PM_MODEL_WEIGHT`, `PM_FLOW_GAIN`, `PM_WARMUP_S`, `PM_NO_ENTRY_S` | 0.05, 0.005, 0.04, 0.015, 1000, 0.25, 0.05, 0.1, 0.6, 0.3, 20, 10 | Parámetros del motor de señales (ver [signal-engine](../features/signal-engine.md)) |
-| server | `PM_SYNC_ENABLED`, `PM_SYNC_DELAY_MS` | true, 300 | Motor B sincronizado (solo en memoria) y su retraso tras cada segundo de Binance ([engine-sync](../features/engine-sync.md)) |
+| server | `PM_ENGINE_A_DELAY_MS`, `PM_ENGINE_B_DELAY_MS`, `PM_ENGINE_C_DELAY_MS` | 0, 300, 150 | Retraso de cada motor tras cada segundo de Binance ([engines](../features/engines.md)) |
 | server | `PM_LIVE_WS_URL`, `PM_BOOK_WS_URL`, `PM_GAMMA_URL`, `PM_SITE_URL` | URLs de Polymarket | Endpoints upstream |
 | server | `PM_TWAP_SECONDS` | 60 | Ventana del TWAP de Chainlink para price to beat y cierre |
 | server | `PM_CLOB_API_KEY`, `PM_CLOB_SECRET`, `PM_CLOB_PASSPHRASE` | (vacío) | Credenciales CLOB para el TWAP en vivo (PolyBolt). **Solo en `apps/server/.env.local`**; sin ellas se usa el spot del RTDS |

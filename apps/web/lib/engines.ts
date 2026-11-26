@@ -1,4 +1,4 @@
-import type { PmBlock, PmDecision, PmSignal } from "@updown/protocol";
+import type { PmBlock, PmDecision, PmEngineId, PmSignal } from "@updown/protocol";
 
 /** Texto corto de cada impedimento del motor (por que no compra / vende ese lado). */
 export const BLOCK_LABEL: Record<PmBlock, string> = {
@@ -60,3 +60,12 @@ export function paperNet(trades: PmSignal[], result: "up" | "down" | null): numb
   }
   return Math.round((net + open[result]) * 100) / 100;
 }
+
+export const ENGINE_IDS: PmEngineId[] = ["a", "b", "c"];
+/** Nombre corto y descripcion de cada motor (retrasos por defecto; el servidor envia los reales por el canal engines) */
+export const ENGINE_LABEL: Record<PmEngineId, string> = { a: "Motor A", b: "Motor B", c: "Motor C" };
+export const ENGINE_DESC: Record<PmEngineId, string> = {
+  a: "segundo exacto, lo último recibido",
+  b: "segundo + 300 ms, datos a fecha",
+  c: "segundo + 150 ms, datos a fecha",
+};

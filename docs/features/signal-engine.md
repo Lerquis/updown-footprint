@@ -42,7 +42,7 @@ Los buffers de aggTrades y heatmap se vuelcan a disco una vez por segundo en una
 - `GET /api/markets` lista un resumen de todos los markets guardados ([protocolo](../architecture/protocol.md)); el resumen se guarda en columnas de `markets` al guardar (y se rellena al arrancar en bases antiguas).
 - `bars`, `cvd` y `signals` dentro del JSON del market son redundantes (derivables); se conservan para mostrar el historial al instante.
 
-Hay un segundo motor con las mismas reglas, sincronizado con el reloj de Binance (solo en memoria), y un registro de por qué decide cada uno: [engine-sync](engine-sync.md).
+Estas reglas las aplican tres motores (A, B y C) que deciden en instantes y con datos distintos; los tres se guardan: [engines](engines.md).
 
 ## Límites conocidos
 - Los pesos de flujo, `flowGain`, `modelWeight` y `minEdge` son **priors conservadores**, no calibrados. Calibrar con los markets guardados (cientos) antes de confiar en el resultado.

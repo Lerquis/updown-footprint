@@ -5,8 +5,8 @@ El servidor es quien recoge los datos 24 h (Binance, Polymarket), así que es é
 ```
 Railway (región Amsterdam)                       Cloudflare R2
 ┌─────────────────────────────────┐   backup     ┌──────────────────────────┐
-│ servicio "server" (Docker)      │ ───────────▶ │ updown/polymarket-<fecha> │
-│  node --import tsx src/index.ts │   cada 24 h  │ updown/latest.json        │
+│ servicio "server" (Docker)      │ ───────────▶ │ updown/v2/polymarket-<fecha> │
+│  node --import tsx src/index.ts │   cada 24 h  │ updown/v2/latest.json        │
 │  Volume /data/polymarket.db     │ ◀─────────── │                           │
 └─────────────────────────────────┘  restaurar   └──────────────────────────┘
           ▲ wss:// + https:// (/ws/*, /api/markets)    (si el volumen está vacío)
@@ -14,7 +14,7 @@ Railway (región Amsterdam)                       Cloudflare R2
      frontend (apps/web)
 ```
 
-- **Base**: la misma SQLite de siempre, en un **Volume** de Railway montado en `/data` (`PM_DB_PATH=/data/polymarket.db`, ya fijado en el Dockerfile). Sin cambios de código respecto a local.
+- **Base**: la misma SQLite de siempre, en un **Volume** de Railway montado en `/data` (`PM_DB_PATH=/data/polymarket.db`, ya fijado en el Dockerfile; el archivo real lleva la generación: `/data/polymarket-v2.db`). Sin cambios de código respecto a local.
 - **Backup**: cada `BACKUP_INTERVAL_H` (24) el servidor hace una copia consistente (`VACUUM INTO` en un hilo aparte, no bloquea), la comprime y la sube al bucket; `latest.json` apunta a la última.
 - **Restauración**: con `PM_DB_RESTORE=true`, si al arrancar **no existe** la base, se descarga la última copia antes de abrirla. Nunca sobrescribe una base existente.
 - Todo lo de backup se desactiva solo si faltan las variables `BACKUP_S3_*`: en local nada cambia.
@@ -28,14 +28,14 @@ No es problema. El servicio de Railway usa la **raíz del repo** como contexto d
 ## 1. Bucket de backups (Cloudflare R2)
 1. Cloudflare → R2 → crear bucket (p. ej. `updown-backups`), ubicación Europa.
 2. R2 → *Manage API tokens* → token con permiso **Object Read & Write** limitado a ese bucket. Anotar *Access Key ID*, *Secret Access Key* y el endpoint `https://<account_id>.r2.cloudflarestorage.com`.
-3. (Opcional) Regla de ciclo de vida del bucket: borrar objetos con prefijo `updown/polymarket-` de más de 30 días, para no acumular una copia completa por día.
+3. (Opcional) Regla de ciclo de vida del bucket: borrar objetos con prefijo `updown/v2/polymarket-` de más de 30 días (no tocar `updown/archive/`), para no acumular una copia completa por día.
 
 Sirve cualquier almacenamiento compatible con S3 (Backblaze B2, AWS S3): solo cambian endpoint y región.
 
 ## 2. Subir la base actual (una vez)
 Para no empezar de cero, se sube la base local al bucket y Railway la descarga al primer arranque.
 1. Añadir en `apps/server/.env.local` (gitignored) las variables `BACKUP_S3_*` (tabla abajo).
-2. `npm run backup -w @updown/server` → sube una copia de `data/polymarket.db` (se puede hacer con el servidor local en marcha).
+2. `npm run backup -w @updown/server` → sube una copia de `data/polymarket-v2.db` (se puede hacer con el servidor local en marcha).
 
 ## 3. Servicio en Railway
 1. *New project* → *Deploy from GitHub repo* → este repo.
@@ -68,7 +68,8 @@ Para no empezar de cero, se sube la base local al bucket y Railway la descarga a
 ## Operación
 - **Cada deploy reinicia el servidor** (con volumen solo hay 1 réplica): se pierde el market en curso y hay un hueco breve de aggTrades. Desplegar justo al empezar un market.
 - **Backup manual**: igual que el paso 2, o reducir `BACKUP_INTERVAL_H`. Cada backup ocupa en disco temporal (`/data/backup-tmp`) una copia sin comprimir + la comprimida: el volumen necesita ~2× el tamaño de la base libre.
-- **Restaurar en local** desde la nube: `npm run backup -w @updown/server -- restore` (solo si `data/polymarket.db` no existe; con una clave concreta: `-- restore updown/polymarket-<fecha>.db.gz`).
+- **Restaurar en local** desde la nube: `npm run backup -w @updown/server -- restore` (solo si `data/polymarket-v2.db` no existe; con una clave concreta: `-- restore updown/v2/polymarket-<fecha>.db.gz`).
+- **Archivo de la generación anterior**: al arrancar, si existe la base sin sufijo (`polymarket.db`) y no tiene marca `.archived`, se sube **una vez** a `updown/archive/polymarket-<railway|local>-<fecha>.db.gz` (también a mano: `npm run backup -w @updown/server -- archive`). No se borra ni se modifica ([ADR 0011](../decisions/0011-tres-motores-guardados-y-base-v2.md)).
 - **Desastre** (volumen borrado): crear volumen nuevo en `/data` con `PM_DB_RESTORE=true` → arranca desde la última copia.
 
 ## Variables de backup
@@ -76,7 +77,7 @@ Para no empezar de cero, se sube la base local al bucket y Railway la descarga a
 |---|---|---|
 | `BACKUP_S3_ENDPOINT` / `BACKUP_S3_BUCKET` / `BACKUP_S3_ACCESS_KEY_ID` / `BACKUP_S3_SECRET_ACCESS_KEY` | vacío | Bucket S3/R2. Si falta alguna, no hay backups ni restauración |
 | `BACKUP_S3_REGION` | `auto` | `auto` en R2; región real en S3/B2 |
-| `BACKUP_PREFIX` | `updown/` | Carpeta dentro del bucket |
+| `BACKUP_PREFIX` | `updown/` | Carpeta base: los backups van a `<prefijo>v2/` (generación de la base) y el archivo de bases anteriores a `<prefijo>archive/` |
 | `BACKUP_INTERVAL_H` | `24` | Horas entre backups (se recuerda en `/data/.last-backup`) |
 | `BACKUP_ENABLED` | `true` | `false`: no programar backups (la restauración y `npm run backup` siguen funcionando) |
 | `PM_DB_RESTORE` | `false` | Al arrancar sin base, descargar la última copia |

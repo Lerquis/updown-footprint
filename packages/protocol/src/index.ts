@@ -534,6 +534,8 @@ export interface PmMarketRow {
   invested: number;
   sold: number;
   net: number | null;
+  /** resumen por motor (A = los campos trades/invested/sold/net de arriba) */
+  engines: Record<PmEngineId, PmEngineSummary>;
   /** versión del motor con que se generó (null en markets anteriores a esa columna) */
   engineVersion: number | null;
   /** los aggTrades guardados cubren la ventana con su margen previo (se puede reconstruir el footprint) */
@@ -547,16 +549,33 @@ export interface PmMarketsResponse {
   markets: PmMarketRow[];
 }
 
+/** Resultado de un motor en un market: sus muestras de 1 s ("fotos" con que decidio) y sus operaciones. */
+export interface PmEngineRun {
+  points: PmPoint[];
+  trades: PmSignal[];
+  pnl: PmPnl;
+}
+
+/** Operaciones y resultado de papel de un motor en un market (para la tabla) */
+export interface PmEngineSummary {
+  trades: number;
+  invested: number;
+  net: number | null;
+}
+
 export interface PmRecord {
   market: PmMarket;
+  /** muestras del motor A (segundo exacto, datos en vivo); tambien sirven para el grafico de precios del market */
   points: PmPoint[];
   /** barras footprint de la ventana (las que empiezan dentro de [start, end)) */
   bars: FootprintBar[];
   cvd: CvdPoint[];
   signals: OrderflowSignal[];
-  /** senales de compra/venta del motor durante la ventana */
+  /** senales de compra/venta del motor A durante la ventana */
   trades: PmSignal[];
   pnl: PmPnl;
+  /** motores B y C (mismas reglas, datos "a fecha" del segundo): sus muestras y operaciones. Ausente en markets antiguos */
+  engines?: Partial<Record<"b" | "c", PmEngineRun>>;
   /** true si el servidor tuvo datos de los 5 minutos completos (solo esos se guardan en la base de datos) */
   complete: boolean;
 }
@@ -567,10 +586,12 @@ export type PolymarketServerMessage =
       /** market en curso (null si aun no se conoce) y el siguiente */
       current: PmMarket | null;
       next: PmMarket | null;
-      /** muestras del market en curso */
+      /** muestras del motor A en el market en curso */
       points: PmPoint[];
-      /** senales del motor del market en curso */
+      /** senales del motor A del market en curso */
       trades: PmSignal[];
+      /** muestras y senales de los motores B y C en el market en curso */
+      engines: Record<"b" | "c", { points: PmPoint[]; trades: PmSignal[] }>;
       /** markets terminados, antiguo -> reciente */
       history: PmRecord[];
       /** cuantos markets terminados guarda el servidor */
@@ -579,21 +600,24 @@ export type PolymarketServerMessage =
     }
   /** cambio de current/next (rotacion, tokens o resultado recibidos) */
   | { type: "markets"; current: PmMarket | null; next: PmMarket | null }
-  | { type: "point"; point: PmPoint }
-  /** senal de compra/venta del motor en el market en curso */
-  | { type: "signal"; signal: PmSignal }
+  /** muestra de 1 s de un motor en el market en curso */
+  | { type: "point"; engine: PmEngineId; point: PmPoint }
+  /** senal de compra/venta de un motor en el market en curso */
+  | { type: "signal"; engine: PmEngineId; signal: PmSignal }
   /** market terminado (o su resultado actualizado): el cliente hace upsert por slug */
   | { type: "record"; record: PmRecord }
   | { type: "status"; upstream: UpstreamState };
 
-// ───────────────────────── Canal engines (decisiones de los motores A y B) ─────────────────────────
+// ───────────────────────── Canal engines (decisiones de los motores A, B y C) ─────────────────────────
 
 /**
- * a: motor principal (muestrea con el reloj interno del servidor; es el que se guarda en la base de datos).
- * b: motor sincronizado (mismas reglas; decide en el segundo exacto del reloj de Binance con datos "a fecha"
- *    de ese segundo, para que servidores distintos tomen las mismas decisiones). Solo en memoria.
+ * Tres motores con las mismas reglas, que deciden una vez por segundo de Binance en instantes distintos:
+ * a: en el segundo exacto, lo antes posible, con lo ultimo recibido ("en vivo").
+ * b: el segundo exacto + 300 ms, con datos "a fecha" de ese segundo (marca de tiempo <= T).
+ * c: igual que b pero + 150 ms.
+ * Los tres se guardan en la base de datos (A en `points`/`trades` del market, B y C en `engines`).
  */
-export type PmEngineId = "a" | "b";
+export type PmEngineId = "a" | "b" | "c";
 
 /**
  * Por que un lado se compra / vende (ok) o no en ese segundo. Se informa el primer impedimento, en el orden en que el motor los evalua:
@@ -649,7 +673,7 @@ export interface PmDecision {
   signals: PmSignal[];
 }
 
-/** Umbrales con que deciden ambos motores (para leer las decisiones) */
+/** Umbrales con que deciden los motores (los mismos para todos) */
 export interface PmEngineThresholds {
   minEdge: number;
   exitMargin: number;
@@ -658,27 +682,22 @@ export interface PmEngineThresholds {
   noEntryS: number;
 }
 
-/** Operaciones del motor B en un market ya terminado (en memoria del servidor; no se guardan en la base) */
-export interface PmEngineMarket {
-  slug: string;
-  trades: PmSignal[];
+/** Como decide cada motor */
+export interface PmEngineInfo {
+  id: PmEngineId;
+  /** live: lo ultimo recibido · asOf: datos con marca de tiempo <= segundo */
+  mode: "live" | "asOf";
+  /** ms tras el inicio del segundo de Binance en que decide */
+  delayMs: number;
 }
 
 export type EnginesServerMessage =
   | {
       type: "snapshot";
-      /** market en curso de cada motor (null hasta el primero) */
-      slug: string | null;
       thresholds: PmEngineThresholds;
-      /** retraso (ms) tras cada segundo de Binance con que decide el motor B */
-      syncDelayMs: number;
-      /** decisiones del market en curso, antiguo -> reciente */
-      a: PmDecision[];
-      b: PmDecision[];
-      /** operaciones del motor B en los ultimos markets terminados, antiguo -> reciente */
-      bHistory: PmEngineMarket[];
+      engines: PmEngineInfo[];
+      /** decisiones del market en curso de cada motor (con su slug), antiguo -> reciente */
+      decisions: Record<PmEngineId, { slug: string | null; decisions: PmDecision[] }>;
     }
   /** nueva decision de un motor; si cambia `slug`, empieza un market nuevo (el cliente vacia ese motor) */
-  | { type: "decision"; engine: PmEngineId; slug: string; decision: PmDecision }
-  /** el motor B termino un market (para su historial) */
-  | { type: "bMarket"; market: PmEngineMarket };
+  | { type: "decision"; engine: PmEngineId; slug: string; decision: PmDecision };

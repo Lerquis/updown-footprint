@@ -8,7 +8,7 @@ import {
   type DepthServerMessage,
   type EnginesServerMessage,
   type OrderflowServerMessage,
-  type PmDecision,
+  type PmEngineId,
   type PmMarketsResponse,
   type PolymarketServerMessage,
   type UpstreamState,
@@ -34,7 +34,7 @@ import { ENGINE_VERSION, MarketStore } from "./polymarket/store.js";
 import { DEFAULT_MODEL } from "./polymarket/model.js";
 import { DEFAULT_STRATEGY } from "./polymarket/strategy.js";
 import { DbBackup } from "./backup/backup.js";
-import { SyncEngine } from "./polymarket/syncEngine.js";
+import { PmFeed, scheduleEngine, TimedEngine } from "./polymarket/timedEngine.js";
 import { slotStart } from "./polymarket/tracker.js";
 
 const SYMBOL = config.symbol.toUpperCase();
@@ -81,6 +81,11 @@ const dbBackup = bk.s3.bucket && bk.s3.endpoint && bk.s3.accessKeyId && bk.s3.se
 if (dbBackup && bk.restore) await dbBackup.restoreIfMissing();
 const marketStore = new MarketStore(config.pmDbPath, SYMBOL);
 if (dbBackup && bk.enabled) dbBackup.start();
+// La base de la generacion anterior (si existe) se sube una vez al archivo del bucket; nunca se borra ni se modifica
+if (dbBackup)
+  void dbBackup
+    .archiveOnce(config.pmLegacyDbPath, process.env.RAILWAY_ENVIRONMENT ? "railway" : "local")
+    .catch((e) => console.error(`[backup] no se pudo archivar la base anterior: ${e instanceof Error ? e.message : e}`));
 const strategy = {
   ...DEFAULT_STRATEGY,
   model: { ...DEFAULT_MODEL, modelWeight: config.pmModelWeight, flowGain: config.pmFlowGain, twapSeconds: config.pmTwapSeconds },
@@ -95,9 +100,12 @@ const strategy = {
   warmupS: config.pmWarmupS,
   noEntryS: config.pmNoEntryS,
 };
+const ENGINE_IDS: PmEngineId[] = ["a", "b", "c"];
+const engineInfo = ENGINE_IDS.map((id) => ({ id, mode: id === "a" ? ("live" as const) : ("asOf" as const), delayMs: config.pmEngineDelayMs[id] }));
 /** Parametros con los que se genera cada market guardado (para reproducirlo) */
 const engineParams = {
   strategy,
+  engines: engineInfo,
   detector: { tick: config.footprintTick, barMs: config.barMs, imbalanceRatio: config.imbalanceRatio, imbalanceMinVol: config.imbalanceMinVol, imbalanceMinStack: config.imbalanceMinStack },
   depth: { step: config.depthStep, rangePct: config.depthRangePct, intervalMs: config.depthIntervalMs },
 };
@@ -113,16 +121,14 @@ const tracker = new PolymarketTracker(
     retryMs: 3000,
     resolveTries: 200,
     pointsMax: Math.ceil(config.pmMarketMs / 1000) + 60,
-    strategy,
   },
 );
 tracker.restore(marketStore.recent(config.pmHistory));
-// Motor B: mismas reglas, decision en el segundo exacto de Binance con datos "a fecha"; solo en memoria (no se guarda)
-const syncEngine = config.pmSyncEnabled
-  ? new SyncEngine({ strategy, retentionMs: config.retentionMs, historyMax: config.pmHistory, decisionsMax: Math.ceil(config.pmMarketMs / 1000) + 10 })
-  : null;
-/** Decisiones del motor A en el market en curso (para el canal engines; el market se guarda aparte con sus senales) */
-const engineA = { slug: null as string | null, decisions: [] as PmDecision[] };
+// Motores A, B y C: mismas reglas; deciden cada segundo de Binance (+ su retraso). A con lo ultimo recibido, B y C "a fecha".
+const feed = new PmFeed();
+const engines3 = Object.fromEntries(
+  engineInfo.map((e) => [e.id, new TimedEngine({ ...e, strategy, retentionMs: config.retentionMs, decisionsMax: Math.ceil(config.pmMarketMs / 1000) + 10 }, feed)]),
+) as Record<PmEngineId, TimedEngine>;
 console.log(`[polymarket] db ${config.pmDbPath}: ${marketStore.count()} markets completos guardados, ${marketStore.counts().trades} aggTrades, ${tracker.history.length} cargados`);
 
 // ── Canales (uno por tipo de dato; cada uno envia snapshot al conectar) ──
@@ -167,6 +173,10 @@ const polymarket = new Channel<PolymarketServerMessage>(() => ({
   next: tracker.next,
   points: tracker.points.slice(),
   trades: tracker.trades.slice(),
+  engines: {
+    b: { points: tracker.live("b").points.slice(), trades: tracker.live("b").trades.slice() },
+    c: { points: tracker.live("c").points.slice(), trades: tracker.live("c").trades.slice() },
+  },
   history: tracker.history.slice(),
   historyMax: config.pmHistory,
   upstream: pmUpstream(),
@@ -174,12 +184,12 @@ const polymarket = new Channel<PolymarketServerMessage>(() => ({
 
 const engines = new Channel<EnginesServerMessage>(() => ({
   type: "snapshot",
-  slug: engineA.slug,
   thresholds: { minEdge: strategy.minEdge, exitMargin: strategy.exitMargin, maxSpread: strategy.maxSpread, warmupS: strategy.warmupS, noEntryS: strategy.noEntryS },
-  syncDelayMs: config.pmSyncDelayMs,
-  a: engineA.decisions.slice(),
-  b: syncEngine?.decisions.slice() ?? [],
-  bHistory: syncEngine?.history.slice() ?? [],
+  engines: engineInfo,
+  decisions: Object.fromEntries(ENGINE_IDS.map((id) => [id, { slug: engines3[id].slug, decisions: engines3[id].decisions.slice() }])) as Record<
+    PmEngineId,
+    { slug: string | null; decisions: import("@updown/protocol").PmDecision[] }
+  >,
 }));
 
 // ── Tuberia de trades: relleno historico + vivo, sin duplicados ──
@@ -193,7 +203,7 @@ const ingest = (t: AggTrade) => {
   buffer.push(t);
   marketStore.addTrade(t);
   engine.ingest(t);
-  syncEngine?.addTrade(t);
+  for (const id of ENGINE_IDS) engines3[id].addTrade(t);
   if (ready) aggTrades.broadcast({ type: "trade", trade: t });
 };
 
@@ -210,29 +220,21 @@ upstream.on("state", (s) => {
 });
 depthClient.on("state", (s) => depth.broadcast({ type: "status", upstream: s }));
 
-chainlink.on("price", (p) => {
-  tracker.setChainlink(p.value);
-  syncEngine?.onChainlink(p.time, p.value);
-});
+chainlink.on("price", (p) => feed.onChainlink(p.time, p.value));
 // sin marca de tiempo de Polymarket, se usa la hora de llegada (reloj de Binance estimado)
-tracker.on("quote", (q) => syncEngine?.onQuote(q.token, q.bid, q.ask, q.time ?? clock.now()));
-tracker.on("decision", (slug, decision) => {
-  if (engineA.slug !== slug) {
-    engineA.slug = slug;
-    engineA.decisions = [];
-  }
-  engineA.decisions.push(decision);
-  if (engineA.decisions.length > Math.ceil(config.pmMarketMs / 1000) + 10) engineA.decisions.shift();
-  engines.broadcast({ type: "decision", engine: "a", slug, decision });
-});
-syncEngine?.on("decision", (slug, decision) => engines.broadcast({ type: "decision", engine: "b", slug, decision }));
-syncEngine?.on("market", (market) => engines.broadcast({ type: "bMarket", market }));
+tracker.on("quote", (q) => feed.onQuote(q.token, q.bid, q.ask, q.time ?? clock.now()));
+for (const id of ENGINE_IDS) {
+  engines3[id].on("step", (st) => {
+    tracker.addStep(id, st.slug, st.point, st.signals);
+    engines.broadcast({ type: "decision", engine: id, slug: st.slug, decision: st.decision });
+  });
+}
 const pmStatus = () => polymarket.broadcast({ type: "status", upstream: pmUpstream() });
 tracker.on("status", pmStatus);
 chainlink.on("state", pmStatus);
 tracker.on("markets", (current, next) => ready && polymarket.broadcast({ type: "markets", current, next }));
-tracker.on("point", (point) => ready && polymarket.broadcast({ type: "point", point }));
-tracker.on("signal", (signal) => ready && polymarket.broadcast({ type: "signal", signal }));
+tracker.on("point", (engine, point) => ready && polymarket.broadcast({ type: "point", engine, point }));
+tracker.on("signal", (engine, signal) => ready && polymarket.broadcast({ type: "signal", engine, signal }));
 tracker.on("record", (record) => {
   if (ready) polymarket.broadcast({ type: "record", record });
   // solo se guardan markets resueltos y con los 5 minutos completos (se reintenta al llegar el resultado)
@@ -261,32 +263,30 @@ const flowSampler = setInterval(() => {
   marketStore.flush();
   if (!ready) return;
   engine.tick();
-  tracker.tick(clock.now());
   const r = monitor.update();
   if (!r) return;
   analysis.broadcast({ type: "summary", summary: r.summary });
   if (r.changed) analysis.broadcast({ type: "change", summary: r.summary });
 }, 1000);
 
-// Motor B: un paso por segundo de Binance, disparado `pmSyncDelayMs` despues de que empiece el segundo siguiente
-// (en todos los servidores en el mismo instante de Binance, no segun su reloj interno). Recupera segundos si el timer se retrasa.
-let syncTimer: ReturnType<typeof setTimeout> | undefined;
-let syncLast = 0;
-const syncMarket = (T: number) => {
+// Cada motor da un paso por segundo de Binance, en el segundo + su retraso (igual en todos los servidores, no segun su reloj
+// interno). El tracker (rotacion del market, libro, archivo) se mueve justo antes del paso del motor A.
+const marketAt = (T: number) => {
   const slot = slotStart(T, config.pmMarketMs);
   return tracker.current?.start === slot ? tracker.current : tracker.next?.start === slot ? tracker.next : null;
 };
-const syncLoop = () => {
-  const now = clock.now();
-  const T = Math.floor((now - config.pmSyncDelayMs) / 1000) * 1000;
-  if (ready && syncEngine) {
-    if (!syncLast || T - syncLast > 5000) syncLast = T - 1000;
-    for (let t = syncLast + 1000; t <= T; t += 1000) syncEngine.step(t, syncMarket(t), engine.signals);
-    syncLast = T;
-  }
-  syncTimer = setTimeout(syncLoop, Math.max(50, T + 1000 + config.pmSyncDelayMs - clock.now()));
-};
-if (syncEngine) syncLoop();
+const stopEngines = ENGINE_IDS.map((id) =>
+  scheduleEngine(
+    engines3[id],
+    () => clock.now(),
+    (T) => {
+      if (id === "a") tracker.tick(T);
+      engines3[id].step(T, marketAt(T), engine.signals);
+      if (id === "a") feed.prune(T - 60_000, new Set([tracker.current?.upToken ?? "", tracker.current?.downToken ?? "", tracker.next?.upToken ?? "", tracker.next?.downToken ?? ""]));
+    },
+    () => ready,
+  ),
+);
 
 // ── HTTP + WS ──
 const http = createServer((req, res) => {
@@ -299,7 +299,7 @@ const http = createServer((req, res) => {
         upstream: upstream.state,
         memory: { trades: buffer.size, depthColumns: depthHistory.size, bars: engine.bars.length, cvdPoints: engine.cvdPoints.length, signals: engine.signals.length },
         clients: { aggTrades: aggTrades.size, depth: depth.size, orderflow: orderflow.size, analysis: analysis.size, polymarket: polymarket.size, engines: engines.size },
-        polymarket: { upstream: pmUpstream(), chainlink: chainlink.state, current: tracker.current?.slug ?? null, history: tracker.history.length, saved: marketStore.count(), syncEngine: syncEngine ? { market: syncEngine.slug, decisions: syncEngine.decisions.length } : null },
+        polymarket: { upstream: pmUpstream(), chainlink: chainlink.state, current: tracker.current?.slug ?? null, history: tracker.history.length, saved: marketStore.count(), engines: Object.fromEntries(ENGINE_IDS.map((id) => [id, { market: engines3[id].slug, decisions: engines3[id].decisions.length, delayMs: config.pmEngineDelayMs[id] }])) },
         depth: { upstream: depthClient.state },
       }),
     );
@@ -380,7 +380,7 @@ http.listen(config.port, async () => {
 const shutdown = () => {
   clearInterval(depthSampler);
   clearInterval(flowSampler);
-  clearTimeout(syncTimer);
+  for (const stop of stopEngines) stop();
   upstream.stop();
   depthClient.stop();
   chainlink.stop();

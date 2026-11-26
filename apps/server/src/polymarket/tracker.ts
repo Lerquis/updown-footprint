@@ -1,8 +1,7 @@
 import { EventEmitter } from "node:events";
-import type { CvdPoint, FootprintBar, OrderflowSignal, PmDecision, PmMarket, PmPoint, PmRecord, PmSignal, UpstreamState } from "@updown/protocol";
+import type { CvdPoint, FootprintBar, OrderflowSignal, PmEngineId, PmMarket, PmPoint, PmRecord, PmSignal, UpstreamState } from "@updown/protocol";
 import type { PolymarketApi } from "./api.js";
-import { flowContext } from "./model.js";
-import { computePnl, DEFAULT_STRATEGY, SignalEngine, type StrategyConfig } from "./strategy.js";
+import { computePnl } from "./strategy.js";
 
 /** Datos de flujo de Binance que se archivan junto a cada market. */
 export interface FlowSource {
@@ -41,21 +40,26 @@ export interface TrackerOptions {
   retryMs: number;
   /** maximo de reintentos para obtener el resultado oficial */
   resolveTries: number;
-  /** tope de muestras de 1 s del market en curso */
+  /** tope de muestras de 1 s por motor y market */
   pointsMax: number;
-  /** reglas del motor de senales (por defecto `DEFAULT_STRATEGY`) */
-  strategy?: StrategyConfig;
 }
+
+/** Muestras y senales de un motor en un market */
+export interface EngineTrack {
+  points: PmPoint[];
+  trades: PmSignal[];
+}
+export type EngineTracks = Record<PmEngineId, EngineTrack>;
+const emptyTracks = (): EngineTracks => ({ a: { points: [], trades: [] }, b: { points: [], trades: [] }, c: { points: [], trades: [] } });
 
 export interface TrackerEvents {
   /** cambio en current/next */
   markets: [PmMarket | null, PmMarket | null];
-  point: [PmPoint];
-  /** senal de compra/venta del motor */
-  signal: [PmSignal];
-  /** por que decidio el motor lo que decidio en ese segundo (slug del market, decision) */
-  decision: [string, PmDecision];
-  /** cotizacion recibida del libro del market en curso (para el motor sincronizado) */
+  /** muestra de 1 s de un motor en el market en curso */
+  point: [PmEngineId, PmPoint];
+  /** senal de compra/venta de un motor */
+  signal: [PmEngineId, PmSignal];
+  /** cotizacion recibida del libro del market en curso (para los motores) */
   quote: [BookQuote];
   /** market archivado o con resultado actualizado */
   record: [PmRecord];
@@ -80,42 +84,41 @@ export function isComplete(market: PmMarket, points: PmPoint[], maxGapMs = 3000,
   return full.length >= minShare * ((market.end - market.start) / 1000);
 }
 
-/** Empaqueta lo ocurrido en la ventana [start, end) del market. Funcion pura. */
-export function buildRecord(market: PmMarket, points: PmPoint[], flow: FlowSource, trades: PmSignal[] = []): PmRecord {
+/**
+ * Empaqueta lo ocurrido en la ventana [start, end) del market: flujo de Binance y lo de cada motor
+ * (A en `points`/`trades`, B y C en `engines`). La completitud se mide con las muestras de A. Funcion pura.
+ */
+export function buildRecord(market: PmMarket, tracks: EngineTracks, flow: FlowSource): PmRecord {
   const { start, end } = market;
+  const run = (t: EngineTrack) => ({ points: t.points.slice(), trades: t.trades.slice(), pnl: computePnl(t.trades, market.result) });
   return {
     market: { ...market },
-    points: points.slice(),
+    points: tracks.a.points.slice(),
     bars: flow.bars().filter((b) => b.start >= start && b.start < end),
     cvd: flow.cvd().filter((p) => p.time > start && p.time <= end),
     signals: flow.signals().filter((s) => s.barStart >= start && s.barStart < end),
-    trades: trades.slice(),
-    pnl: computePnl(trades, market.result),
-    complete: isComplete(market, points),
+    trades: tracks.a.trades.slice(),
+    pnl: computePnl(tracks.a.trades, market.result),
+    engines: { b: run(tracks.b), c: run(tracks.c) },
+    complete: isComplete(market, tracks.a.points),
   };
 }
 
 /**
- * Sigue el market BTC Up/Down en curso (rota solo cada `marketMs`), muestrea los precios de los
- * tokens Up/Down cada segundo, y archiva en memoria cada market terminado junto al flujo de Binance.
+ * Sigue el market BTC Up/Down en curso (rota solo cada `marketMs`), mantiene el libro de sus tokens, recoge lo
+ * que producen los motores (A, B, C: `addStep`) y archiva en memoria cada market terminado junto al flujo de Binance.
  * Se mueve con `tick()` (1 Hz). Los tiempos vienen del reloj de Binance (`now`).
  */
 export class PolymarketTracker extends EventEmitter<TrackerEvents> {
   current: PmMarket | null = null;
   next: PmMarket | null = null;
-  points: PmPoint[] = [];
-  /** senales del motor en el market en curso */
-  trades: PmSignal[] = [];
   readonly history: PmRecord[] = [];
 
-  private chainlink: number | null = null;
-  private quotes = new Map<string, { bid: number | null; ask: number | null }>();
   private book?: BookLike;
   private bookFor = "";
-  private finalizing: { market: PmMarket; points: PmPoint[]; trades: PmSignal[] }[] = [];
-  private engine?: SignalEngine;
-  /** basis Chainlink - Binance suavizado (EMA, vida media 60 s): la medida puntual oscila varios USD */
-  private basisEma: number | null = null;
+  private finalizing: PmMarket[] = [];
+  /** muestras y senales de cada motor, por slug (los motores pueden empezar un market antes de que rote el tracker) */
+  private tracks = new Map<string, EngineTracks>();
   private busy = new Set<string>();
   private lastTry = new Map<string, number>();
   private resolveCount = new Map<string, number>();
@@ -129,8 +132,34 @@ export class PolymarketTracker extends EventEmitter<TrackerEvents> {
     super();
   }
 
-  setChainlink(price: number): void {
-    this.chainlink = price;
+  private track(slug: string): EngineTracks {
+    let t = this.tracks.get(slug);
+    if (!t) this.tracks.set(slug, (t = emptyTracks()));
+    return t;
+  }
+
+  /** Muestras del motor A en el market en curso (grafico en vivo) */
+  get points(): PmPoint[] {
+    return this.current ? this.track(this.current.slug).a.points : [];
+  }
+  get trades(): PmSignal[] {
+    return this.current ? this.track(this.current.slug).a.trades : [];
+  }
+  /** Muestras y senales de un motor en el market en curso */
+  live(id: PmEngineId): EngineTrack {
+    return this.current ? this.track(this.current.slug)[id] : { points: [], trades: [] };
+  }
+
+  /** Registra el paso de un motor (su muestra y sus senales) en el market `slug`. */
+  addStep(id: PmEngineId, slug: string, point: PmPoint, signals: PmSignal[]): void {
+    const t = this.track(slug)[id];
+    t.points.push(point);
+    if (t.points.length > this.opts.pointsMax) t.points.shift();
+    for (const sig of signals) {
+      t.trades.push(sig);
+      this.emit("signal", id, sig);
+    }
+    this.emit("point", id, point);
   }
 
   /** Carga markets ya resueltos (de la base de datos) al arrancar, de antiguo a reciente. */
@@ -178,7 +207,6 @@ export class PolymarketTracker extends EventEmitter<TrackerEvents> {
     this.fillMeta(this.next!, now);
     this.fillPriceToBeat(cur, now);
     this.ensureBook(cur);
-    this.sample(cur, now);
     this.finalize(now);
     this.resolveOpen(now);
   }
@@ -186,15 +214,11 @@ export class PolymarketTracker extends EventEmitter<TrackerEvents> {
   private rotate(slot: number): void {
     if (this.current) {
       this.current.status = "resolving";
-      this.finalizing.push({ market: this.current, points: this.points, trades: this.trades });
+      this.finalizing.push(this.current);
     }
     this.current = this.next?.start === slot ? this.next : this.blank(slot, "live");
     this.current.status = "live";
     this.next = null;
-    this.points = [];
-    this.trades = [];
-    this.engine = new SignalEngine(this.current, this.opts.strategy ?? DEFAULT_STRATEGY);
-    this.quotes.clear();
     this.book?.stop();
     this.book = undefined;
     this.bookFor = "";
@@ -246,9 +270,7 @@ export class PolymarketTracker extends EventEmitter<TrackerEvents> {
     this.bookFor = m.slug;
     const book = this.makeBook([m.upToken, m.downToken]);
     book.on("quote", (q) => {
-      if (this.book !== book) return;
-      this.quotes.set(q.token, { bid: q.bid, ask: q.ask });
-      this.emit("quote", q);
+      if (this.book === book) this.emit("quote", q);
     });
     book.on("state", (st) => {
       if (this.book === book) this.emit("status", st);
@@ -257,45 +279,26 @@ export class PolymarketTracker extends EventEmitter<TrackerEvents> {
     book.start();
   }
 
-  private sample(m: PmMarket, now: number): void {
-    const up = this.quotes.get(m.upToken);
-    const down = this.quotes.get(m.downToken);
-    const ctx = flowContext(now, this.chainlink, this.flow.cvd(), this.flow.signals(), (this.opts.strategy ?? DEFAULT_STRATEGY).model);
-    if (ctx.basis !== null) this.basisEma = this.basisEma === null ? ctx.basis : this.basisEma + (1 - Math.pow(0.5, 1 / 60)) * (ctx.basis - this.basisEma);
-    const point: PmPoint = {
-      time: now,
-      chainlink: this.chainlink,
-      upBid: up?.bid ?? null,
-      upAsk: up?.ask ?? null,
-      downBid: down?.bid ?? null,
-      downAsk: down?.ask ?? null,
-      binance: ctx.binance,
-      basis: ctx.basis === null ? null : this.basisEma,
-      sigma: ctx.sigma,
-      flow: ctx.flow,
-      pModel: null,
-    };
-    const r = this.engine?.step(point);
-    point.pModel = r?.pUp ?? null;
-    if (r) this.emit("decision", m.slug, r.decision);
-    for (const sig of r?.signals ?? []) {
-      this.trades.push(sig);
-      this.emit("signal", sig);
-    }
-    this.points.push(point);
-    if (this.points.length > this.opts.pointsMax) this.points.shift();
-    this.emit("point", point);
-  }
-
   private finalize(now: number): void {
-    const ready = this.finalizing.filter((f) => now >= f.market.end + this.opts.graceMs);
+    this.dropStale(now);
+    const ready = this.finalizing.filter((m) => now >= m.end + this.opts.graceMs);
     if (!ready.length) return;
-    this.finalizing = this.finalizing.filter((f) => !ready.includes(f));
-    for (const f of ready) {
-      const record = buildRecord(f.market, f.points, this.flow, f.trades);
+    this.finalizing = this.finalizing.filter((m) => !ready.includes(m));
+    for (const m of ready) {
+      const record = buildRecord(m, this.tracks.get(m.slug) ?? emptyTracks(), this.flow);
+      this.tracks.delete(m.slug);
       this.history.push(record);
       if (this.history.length > this.opts.historyMax) this.history.shift();
       this.emit("record", record);
+    }
+  }
+
+  /** Olvida pasos de motores de markets que ya no se van a archivar (p. ej. tras un reinicio a mitad de market). */
+  private dropStale(now: number): void {
+    for (const [slug, t] of this.tracks) {
+      if (slug === this.current?.slug || slug === this.next?.slug || this.finalizing.some((m) => m.slug === slug)) continue;
+      const last = Math.max(t.a.points.at(-1)?.time ?? 0, t.b.points.at(-1)?.time ?? 0, t.c.points.at(-1)?.time ?? 0);
+      if (now - last > 2 * this.opts.marketMs) this.tracks.delete(slug);
     }
   }
 
@@ -319,6 +322,7 @@ export class PolymarketTracker extends EventEmitter<TrackerEvents> {
           m.changePct = r.changePct;
           m.status = "closed";
           rec.pnl = computePnl(rec.trades, m.result);
+          for (const e of Object.values(rec.engines ?? {})) e.pnl = computePnl(e.trades, m.result);
           this.emit("record", rec);
         })
         .finally(() => this.busy.delete(key));

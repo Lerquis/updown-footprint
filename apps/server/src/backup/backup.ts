@@ -15,8 +15,10 @@ import { S3Lite, type S3Config } from "./s3.js";
  */
 export interface BackupConfig {
   s3: S3Config;
-  /** carpeta dentro del bucket, p. ej. "updown/" */
+  /** carpeta de los backups dentro del bucket, p. ej. "updown/v2/" */
   prefix: string;
+  /** carpeta del archivo final de bases anteriores, p. ej. "updown/archive/" */
+  archivePrefix: string;
   /** cada cuanto se hace un backup */
   intervalMs: number;
 }
@@ -58,7 +60,7 @@ export class DbBackup {
     private readonly dbPath: string,
   ) {
     this.s3 = new S3Lite(cfg.s3);
-    this.stampFile = join(dirname(dbPath), ".last-backup");
+    this.stampFile = `${dbPath}.last-backup`;
     this.tmpDir = join(dirname(dbPath), "backup-tmp");
   }
 
@@ -97,6 +99,33 @@ export class DbBackup {
     } finally {
       await rm(this.tmpDir, { recursive: true, force: true }).catch(() => undefined);
       this.running = false;
+    }
+  }
+
+  /**
+   * Sube UNA vez una copia de otra base (la de la generacion anterior) a `archivePrefix<nombre>.db.gz` y deja una marca
+   * `<base>.archived` al lado para no repetirlo. No borra ni modifica esa base. Devuelve la clave o null si no habia nada que archivar.
+   */
+  async archiveOnce(srcPath: string, label: string): Promise<string | null> {
+    const mark = `${srcPath}.archived`;
+    if (!existsSync(srcPath) || existsSync(mark)) return null;
+    const t0 = Date.now();
+    const dir = join(dirname(srcPath), "archive-tmp");
+    const raw = join(dir, "archive.db");
+    const gz = `${raw}.gz`;
+    try {
+      await rm(dir, { recursive: true, force: true });
+      mkdirSync(dir, { recursive: true });
+      await snapshot(srcPath, raw);
+      await gzip(raw, gz);
+      const bytes = (await stat(gz)).size;
+      const key = `${this.cfg.archivePrefix}polymarket-${label}-${new Date().toISOString().replace(/[:.]/g, "-")}.db.gz`;
+      await this.s3.putFile(key, gz);
+      writeFileSync(mark, JSON.stringify({ key, bytes, at: Date.now() }));
+      console.log(`[backup] base anterior archivada en ${key} (${mb(bytes)}) en ${((Date.now() - t0) / 1000).toFixed(1)}s`);
+      return key;
+    } finally {
+      await rm(dir, { recursive: true, force: true }).catch(() => undefined);
     }
   }
 

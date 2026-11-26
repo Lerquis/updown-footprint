@@ -10,7 +10,8 @@ Next.js (App Router) + React 19 + TypeScript. Solo habla con nuestro servidor v�
 - `lib/exchangeClock.ts` — reloj de Binance estimado; usarlo (no `Date.now()`) para posicionar datos en el eje de tiempo.
 
 - `lib/usePolymarket.ts` + `components/PolymarketPanel.tsx` / `PolymarketChart.tsx` (SVG, pocos puntos): market en vivo e historial; el flujo del market en vivo se recorta del hook de orderflow. La tabla de historial NO sale del canal WS sino de la API HTTP del servidor (`lib/useMarketRows.ts`: `GET /api/markets` y `/api/markets/<slug>`; `HTTP_BASE` en `useWsChannel.ts`), para ver todos los markets guardados. Las señales de compra/venta (`PmSignal`) vienen del servidor; el frontend solo las dibuja y suma el resultado de papel.
-- `lib/useEngines.ts` + `components/EnginesDrawer.tsx`: canal `/ws/engines` (decisiones de los motores A y B) **bajo demanda** (`useWsChannel` con `path` null no conecta): solo con el drawer abierto o el interruptor "Motor B" del gráfico. Textos de los impedimentos en `lib/engines.ts`. `components/ui/sheet.tsx`: drawer sobre el Dialog de Base UI.
+- Tres motores (A, B, C): `usePolymarket` trae las muestras y operaciones de los tres (`point`/`signal` llevan `engine`); `PolymarketChart` dibuja una sección de probabilidad por motor (`engines: EngineSeries[]`); tabla y totales por motor (`PmMarketRow.engines`). Nombres en `lib/engines.ts`.
+- `lib/useEngines.ts` + `components/EnginesDrawer.tsx`: canal `/ws/engines` (registro de decisiones de A, B y C) **bajo demanda** (`useWsChannel` con `path` null no conecta): solo con el drawer abierto. Textos de los impedimentos en `lib/engines.ts`. `components/ui/sheet.tsx`: drawer sobre el Dialog de Base UI.
 
 ## Convenciones
 - Tipos de mensajes SOLO desde `@updown/protocol`; rutas desde `CHANNELS`.

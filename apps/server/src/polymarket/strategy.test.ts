@@ -3,7 +3,9 @@ import assert from "node:assert/strict";
 import type { CvdPoint, OrderflowSignal, PmMarket, PmPoint, PmRecord } from "@updown/protocol";
 import { blend, estimateSigma, flowScore, modelProbUp, normCdf, takerFee } from "./model.js";
 import { SignalEngine, computePnl, replayMarket, DEFAULT_STRATEGY, type StrategyConfig } from "./strategy.js";
-import { isComplete, buildRecord } from "./tracker.js";
+import { isComplete, buildRecord, type EngineTracks } from "./tracker.js";
+/** Solo motor A (B y C vacios) */
+const onlyA = (points: PmPoint[]): EngineTracks => ({ a: { points, trades: [] }, b: { points: [], trades: [] }, c: { points: [], trades: [] } });
 import { MarketStore, TRADES_LEAD_MS } from "./store.js";
 import { rebuildOrderflow } from "./rebuild.js";
 import { OrderflowEngine } from "../analysis/engine.js";
@@ -168,7 +170,7 @@ test("MarketStore: solo guarda markets resueltos y completos; recent devuelve en
   const mk = (i: number, pts = full(299)) =>
     buildRecord(
       market({ start: T0 + i * 300_000, end: T0 + (i + 1) * 300_000, slug: `m${i}` }),
-      pts.map((p) => ({ ...p, time: p.time + i * 300_000 })),
+      onlyA(pts.map((p) => ({ ...p, time: p.time + i * 300_000 }))),
       flow,
     );
   const resolved = (r: PmRecord): PmRecord => ({ ...r, market: { ...r.market, status: "closed", result: "up" } });
@@ -214,7 +216,7 @@ test("MarketStore.save: guarda version, parametros y si los aggTrades cubren la 
   const store = new MarketStore(":memory:");
   const flow = { bars: () => [], cvd: () => [], signals: () => [] };
   const m = market({ slug: "a", start: T0, end: T0 + 300_000, status: "closed", result: "up" });
-  const rec = buildRecord(m, full(299), flow);
+  const rec = buildRecord(m, onlyA(full(299)), flow);
   // sin aggTrades: se guarda, pero marcado como no reconstruible
   assert.equal(store.save(rec, { version: 7, params: { x: 1 } }), true);
   assert.deepEqual(store.meta("a"), { version: 7, params: { x: 1 }, tradesOk: false });
@@ -252,7 +254,7 @@ test("MarketStore.list: filas resumen sin leer el JSON, con filtros, orden y lim
   const flow = { bars: () => [], cvd: () => [], signals: () => [] };
   for (let i = 0; i < 4; i++) {
     const m = market({ slug: `r${i}`, start: T0 + i * 300_000, end: T0 + (i + 1) * 300_000, status: "closed", result: i % 2 ? "down" : "up", priceToBeat: 100, closePrice: 101, changePct: 1 });
-    store.save(buildRecord(m, full(299).map((p) => ({ ...p, time: p.time + i * 300_000 })), flow));
+    store.save(buildRecord(m, onlyA(full(299).map((p) => ({ ...p, time: p.time + i * 300_000 }))), flow));
   }
   const all = store.list();
   assert.deepEqual(all.map((r) => r.slug), ["r3", "r2", "r1", "r0"]); // mas recientes primero

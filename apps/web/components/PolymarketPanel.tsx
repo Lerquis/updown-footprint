@@ -1,11 +1,10 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import type { PmMarketRow, PmPnl, PmRecord, PmSignal } from "@updown/protocol";
+import type { PmEngineId, PmMarketRow, PmPnl, PmRecord, PmSignal } from "@updown/protocol";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { exchangeClock } from "@/lib/exchangeClock";
 import { fmtClockHM, fmtDayShort } from "@/lib/flow";
@@ -13,9 +12,10 @@ import type { OrderflowView } from "@/lib/useOrderflow";
 import { useFetchRecord, useMarketRows } from "@/lib/useMarketRows";
 import { sliceFlow, type PolymarketView } from "@/lib/usePolymarket";
 import { useEngines } from "@/lib/useEngines";
+import { ENGINE_DESC, ENGINE_IDS, ENGINE_LABEL } from "@/lib/engines";
 import { EnginesDrawer } from "./EnginesDrawer";
 import { LiveBadge } from "./LiveBadge";
-import { PolymarketChart } from "./PolymarketChart";
+import { PolymarketChart, type EngineSeries } from "./PolymarketChart";
 
 const LIVE = "live";
 const PAGE_SIZE = 50;
@@ -61,14 +61,16 @@ function Stat({ label, children, className = "" }: { label: string; children: Re
 const pct = (v: number | null) => (v === null ? "–" : `${(v * 100).toFixed(0)}%`);
 const money = (v: number | null) => (v === null ? "–" : `${sign(v)}${v.toFixed(2)}`);
 
-/** Lista de compras / ventas que el motor senalo en el market mostrado. */
-function TradesList({ trades, start }: { trades: PmSignal[]; start: number }) {
-  if (!trades.length) return <p className="text-[11px] text-muted-foreground">El motor no senalo operaciones en este market.</p>;
+/** Compras / ventas de los tres motores en el market mostrado, por orden de tiempo. */
+function TradesList({ engines, start }: { engines: EngineSeries[]; start: number }) {
+  const all = engines.flatMap((e) => e.trades.map((t) => ({ e: e.id, t }))).sort((x, y) => x.t.time - y.t.time || x.e.localeCompare(y.e));
+  if (!all.length) return <p className="text-[11px] text-muted-foreground">Ningún motor señaló operaciones en este market.</p>;
   return (
     <div className="rounded-md border">
       <Table>
         <TableHeader>
           <TableRow>
+            <TableHead>Motor</TableHead>
             <TableHead>Hora</TableHead>
             <TableHead>Señal</TableHead>
             <TableHead>Motivo</TableHead>
@@ -81,8 +83,9 @@ function TradesList({ trades, start }: { trades: PmSignal[]; start: number }) {
           </TableRow>
         </TableHeader>
         <TableBody>
-          {trades.map((t) => (
-            <TableRow key={t.id}>
+          {all.map(({ e, t }) => (
+            <TableRow key={`${e}${t.id}`}>
+              <TableCell className="font-mono font-semibold">{e.toUpperCase()}</TableCell>
               <TableCell className="font-mono">+{Math.round((t.time - start) / 1000)}s</TableCell>
               <TableCell className={`font-semibold ${t.side === "up" ? "text-buy" : "text-sell"}`}>
                 {t.action === "buy" ? "COMPRAR" : "VENDER"} {t.side === "up" ? "Up" : "Down"}
@@ -109,10 +112,9 @@ export function PolymarketPanel({ pm, flow }: { pm: PolymarketView; flow: Orderf
   const [fetching, setFetching] = useState(false);
   const [page, setPage] = useState(0);
   const fetchRecord = useFetchRecord();
-  // Motores A/B: el canal solo se abre con el drawer abierto o con el motor B visible en el grafico
+  // Decisiones de los motores: el canal solo se abre con el drawer abierto
   const [enginesOpen, setEnginesOpen] = useState(false);
-  const [showB, setShowB] = useState(false);
-  const eng = useEngines(enginesOpen || showB);
+  const eng = useEngines(enginesOpen);
   const [now, setNow] = useState(() => exchangeClock.now());
   useEffect(() => {
     const id = setInterval(() => setNow(exchangeClock.now()), 500);
@@ -138,30 +140,54 @@ export function PolymarketPanel({ pm, flow }: { pm: PolymarketView; flow: Orderf
   const view: PmRecord | null = useMemo(() => {
     if (!isLive) return picked ?? null;
     if (!pm.current) return null;
-    return { market: pm.current, points: pm.points, ...sliceFlow(pm.current, flow), trades: pm.trades, pnl: EMPTY_PNL, complete: true };
-  }, [isLive, picked, pm.current, pm.points, pm.trades, flow]);
+    const run = (e: { points: PmRecord["points"]; trades: PmSignal[] }) => ({ ...e, pnl: EMPTY_PNL });
+    return {
+      market: pm.current,
+      points: pm.points,
+      ...sliceFlow(pm.current, flow),
+      trades: pm.trades,
+      pnl: EMPTY_PNL,
+      engines: { b: run(pm.engines.b), c: run(pm.engines.c) },
+      complete: true,
+    };
+  }, [isLive, picked, pm.current, pm.points, pm.trades, pm.engines, flow]);
 
-  const total = useMemo(() => {
-    let invested = 0;
-    let net = 0;
-    let markets = 0;
-    let wins = 0;
-    for (const r of mk.rows) {
-      if (r.net === null || r.invested <= 0) continue;
-      invested += r.invested;
-      net += r.net;
-      markets++;
-      if (r.net > 0) wins++;
-    }
-    return { invested, net, markets, wins };
-  }, [mk.rows]);
+  // una serie por motor (A = points/trades del market; B y C en `engines`, ausentes en markets antiguos)
+  const series: EngineSeries[] = useMemo(() => {
+    if (!view) return [];
+    const src: Record<PmEngineId, { points: PmRecord["points"]; trades: PmSignal[] } | undefined> = {
+      a: { points: view.points, trades: view.trades },
+      b: view.engines?.b,
+      c: view.engines?.c,
+    };
+    return ENGINE_IDS.filter((id) => src[id]).map((id) => ({ id, label: ENGINE_LABEL[id], desc: ENGINE_DESC[id], points: src[id]!.points, trades: src[id]!.trades }));
+  }, [view]);
+
+  const totals = useMemo(
+    () =>
+      ENGINE_IDS.map((id) => {
+        let invested = 0;
+        let net = 0;
+        let markets = 0;
+        let wins = 0;
+        for (const r of mk.rows) {
+          const e = r.engines[id];
+          if (e.net === null || e.invested <= 0) continue;
+          invested += e.invested;
+          net += e.net;
+          markets++;
+          if (e.net > 0) wins++;
+        }
+        return { id, invested, net, markets, wins };
+      }),
+    [mk.rows],
+  );
 
   const pages = Math.max(1, Math.ceil(mk.rows.length / PAGE_SIZE));
   const curPage = Math.min(page, pages - 1);
   const pageRows = mk.rows.slice(curPage * PAGE_SIZE, (curPage + 1) * PAGE_SIZE);
 
   const m = view?.market ?? null;
-  const tradesB = !showB || !m ? undefined : eng.b.slug === m.slug ? eng.b.trades : eng.bHistory.find((h) => h.slug === m.slug)?.trades;
   const last = view?.points[view.points.length - 1];
   // Referencia para la diferencia con el price to beat: Chainlink ahora (en vivo) o el cierre oficial
   const ref = m ? (isLive ? (last?.chainlink ?? null) : (m.closePrice ?? last?.chainlink ?? null)) : null;
@@ -178,9 +204,6 @@ export function PolymarketPanel({ pm, flow }: { pm: PolymarketView; flow: Orderf
           tokens Up/Down con las señales de Binance marcadas, y el CVD y delta de esos 5 minutos.
         </CardDescription>
         <CardAction className="flex items-center gap-3">
-          <label className="flex items-center gap-1.5 text-[11px] text-muted-foreground" title="Dibuja en el gráfico las operaciones del motor B (sincronizado) para compararlas con las del A">
-            <Switch size="sm" checked={showB} onCheckedChange={setShowB} /> Motor B
-          </label>
           <Button size="sm" variant="outline" onClick={() => setEnginesOpen(true)}>
             Motores
           </Button>
@@ -228,7 +251,7 @@ export function PolymarketPanel({ pm, flow }: { pm: PolymarketView; flow: Orderf
               <Stat label={isLive ? "Chainlink − to beat" : "Cierre − to beat"} className={cls(gap)}>
                 {gap === null ? "–" : `${sign(gap)}${gap.toFixed(2)} USD`}
               </Stat>
-              <Stat label="P(Up) motor" className="text-violet-400">
+              <Stat label="P(Up) motor A" className="text-violet-400">
                 {pct(last?.pModel ?? null)}
               </Stat>
               <Stat label="Flujo" className={cls(last?.flow ?? null)}>
@@ -255,15 +278,22 @@ export function PolymarketPanel({ pm, flow }: { pm: PolymarketView; flow: Orderf
             </div>
 
             <div className="rounded-md border">
-              <PolymarketChart market={m} points={view.points} bars={view.bars} cvd={view.cvd} signals={view.signals} trades={view.trades} tradesB={tradesB} />
+              <PolymarketChart market={m} points={view.points} bars={view.bars} cvd={view.cvd} signals={view.signals} engines={series} />
             </div>
-            <TradesList trades={view.trades} start={m.start} />
-            {showB && !tradesB && <p className="text-[11px] text-muted-foreground">El motor B no tiene datos de este market (solo vive en memoria desde que arrancó el servidor).</p>}
+            <TradesList engines={series} start={m.start} />
             {!isLive && (
               <p className="text-[11px] text-muted-foreground">
-                Resultado del motor en este market: invertido {view.pnl.invested.toFixed(2)} · vendido {view.pnl.sold.toFixed(2)} · neto{" "}
-                <span className={cls(view.pnl.net)}>{money(view.pnl.net)} USDC</span>
-                {view.pnl.roi !== null && <> ({sign(view.pnl.roi)}{(view.pnl.roi * 100).toFixed(1)}%)</>}
+                Resultado en este market:{" "}
+                {ENGINE_IDS.map((id) => {
+                  const p = id === "a" ? view.pnl : view.engines?.[id]?.pnl;
+                  if (!p) return null;
+                  return (
+                    <span key={id} className="mr-3">
+                      {ENGINE_LABEL[id]} invertido {p.invested.toFixed(2)} · neto <span className={cls(p.net)}>{money(p.net)} USDC</span>
+                      {p.roi !== null && <> ({sign(p.roi)}{(p.roi * 100).toFixed(1)}%)</>}
+                    </span>
+                  );
+                })}
                 {!view.complete && <span className="ml-2 text-yellow-500">· datos incompletos: no se guarda en la base de datos</span>}
               </p>
             )}
@@ -277,12 +307,16 @@ export function PolymarketPanel({ pm, flow }: { pm: PolymarketView; flow: Orderf
 
         {mk.error && <p className="text-[11px] text-yellow-500">No se pudo leer la lista de markets del servidor ({mk.error}).</p>}
         {mk.rows.length > 0 && (
-          <p className="text-[11px] text-muted-foreground">
-            Motor, {mk.total} markets guardados: {total.markets} con operaciones · invertido {total.invested.toFixed(2)} USDC · neto{" "}
-            <span className={cls(total.net)}>{money(total.net)} USDC</span>
-            {total.invested > 0 && <> ({sign(total.net)}{((total.net / total.invested) * 100).toFixed(1)}%)</>} · markets ganadores {total.wins}/{total.markets}.
-            Resultados de papel (se asume seguir todas las señales con los precios reales); con pocos markets no son estadisticamente concluyentes.
-          </p>
+          <div className="flex flex-col gap-0.5 text-[11px] text-muted-foreground">
+            <span>{mk.total} markets guardados. Resultados de papel (se asume seguir todas las señales con los precios reales); con pocos markets no son estadísticamente concluyentes.</span>
+            {totals.map((t) => (
+              <span key={t.id}>
+                <b className="text-foreground">{ENGINE_LABEL[t.id]}</b>: {t.markets} con operaciones · invertido {t.invested.toFixed(2)} USDC · neto{" "}
+                <span className={cls(t.net)}>{money(t.net)} USDC</span>
+                {t.invested > 0 && <> ({sign(t.net)}{((t.net / t.invested) * 100).toFixed(1)}%)</>} · ganadores {t.wins}/{t.markets}
+              </span>
+            ))}
+          </div>
         )}
         {mk.rows.length > 0 && (
           <div className="rounded-md border">
@@ -298,8 +332,11 @@ export function PolymarketPanel({ pm, flow }: { pm: PolymarketView; flow: Orderf
                   <TableHead className="text-right">Δ CVD</TableHead>
                   <TableHead className="text-right">Señales</TableHead>
                   <TableHead className="text-right">Up inicio→fin</TableHead>
-                  <TableHead className="text-right">Motor</TableHead>
-                  <TableHead className="text-right">Neto (USDC)</TableHead>
+                  {ENGINE_IDS.map((id) => (
+                    <TableHead key={id} className="text-right">
+                      {id.toUpperCase()} ops · neto
+                    </TableHead>
+                  ))}
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -328,8 +365,11 @@ export function PolymarketPanel({ pm, flow }: { pm: PolymarketView; flow: Orderf
                     <TableCell className="text-right font-mono">
                       {cents(r.upStart)}→{cents(r.upEnd)}
                     </TableCell>
-                    <TableCell className="text-right font-mono">{r.trades}</TableCell>
-                    <TableCell className={`text-right font-mono ${cls(r.net)}`}>{money(r.net)}</TableCell>
+                    {ENGINE_IDS.map((id) => (
+                      <TableCell key={id} className="text-right font-mono">
+                        {r.engines[id].trades} · <span className={cls(r.engines[id].net)}>{money(r.engines[id].net)}</span>
+                      </TableCell>
+                    ))}
                   </TableRow>
                 ))}
               </TableBody>
@@ -350,7 +390,7 @@ export function PolymarketPanel({ pm, flow }: { pm: PolymarketView; flow: Orderf
           </div>
         )}
       </CardContent>
-      <EnginesDrawer open={enginesOpen} onOpenChange={setEnginesOpen} eng={eng} history={pm.history} marketStart={pm.current?.start ?? 0} />
+      <EnginesDrawer open={enginesOpen} onOpenChange={setEnginesOpen} eng={eng} rows={mk.rows} marketStart={pm.current?.start ?? 0} />
     </Card>
   );
 }

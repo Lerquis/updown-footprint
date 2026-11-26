@@ -1,7 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { AggTrade, DepthColumn, PmMarketRow, PmRecord } from "@updown/protocol";
+import type { AggTrade, DepthColumn, PmEngineRun, PmMarketRow, PmRecord } from "@updown/protocol";
 
 /** Margen de aggTrades guardado ANTES del inicio de cada market: el motor necesita historia (sigma 15 min, CVD, footprint) para reproducirse. */
 export const TRADES_LEAD_MS = 10 * 60_000;
@@ -9,7 +9,7 @@ export const TRADES_LEAD_MS = 10 * 60_000;
 const EDGE_TOL_MS = 5000;
 
 /** Version de la logica que produce flow/pModel/trades; subirla al cambiar modelo, detectores o reglas. */
-export const ENGINE_VERSION = 1;
+export const ENGINE_VERSION = 2;
 
 /** Metadatos de reproducibilidad que se guardan junto a cada market. */
 export interface SaveMeta {
@@ -84,6 +84,8 @@ export class MarketStore {
     add("trades_ok", "INTEGER");
     // columnas de resumen para listar sin leer el JSON (GET /api/markets)
     for (const [n, t] of [["delta", "REAL"], ["cvd_change", "REAL"], ["bull", "INTEGER"], ["bear", "INTEGER"], ["up_start", "REAL"], ["up_end", "REAL"], ["n_trades", "INTEGER"], ["invested", "REAL"], ["sold", "REAL"], ["change_pct", "REAL"], ["end_ms", "INTEGER"]] as const) add(n, t);
+    // resumen de los motores B y C (A usa n_trades / invested / net)
+    for (const e of ["b", "c"]) for (const [n, t] of [["trades", "INTEGER"], ["invested", "REAL"], ["net", "REAL"]] as const) add(`${e}_${n}`, t);
     this.backfillSummaries();
   }
 
@@ -96,8 +98,14 @@ export class MarketStore {
   private writeSummary(slug: string, rec: PmRecord): void {
     const x = summarizeRecord(rec);
     this.db
-      .prepare("UPDATE markets SET delta = ?, cvd_change = ?, bull = ?, bear = ?, up_start = ?, up_end = ?, n_trades = ?, invested = ?, sold = ?, change_pct = ?, end_ms = ? WHERE slug = ?")
-      .run(x.delta, x.cvdChange, x.bull, x.bear, x.upStart, x.upEnd, x.trades, x.invested, x.sold, rec.market.changePct, rec.market.end, slug);
+      .prepare(
+        `UPDATE markets SET delta = ?, cvd_change = ?, bull = ?, bear = ?, up_start = ?, up_end = ?, n_trades = ?, invested = ?, sold = ?, change_pct = ?, end_ms = ?,
+         b_trades = ?, b_invested = ?, b_net = ?, c_trades = ?, c_invested = ?, c_net = ? WHERE slug = ?`,
+      )
+      .run(
+        x.delta, x.cvdChange, x.bull, x.bear, x.upStart, x.upEnd, x.trades, x.invested, x.sold, rec.market.changePct, rec.market.end,
+        x.engines.b.trades, x.engines.b.invested, x.engines.b.net, x.engines.c.trades, x.engines.c.invested, x.engines.c.net, slug,
+      );
   }
 
   // ───────────── escritura continua (buffer + transaccion por lote) ─────────────
@@ -217,10 +225,16 @@ export class MarketStore {
     const order = opts.order === "asc" ? "ASC" : "DESC";
     const rows = this.db
       .prepare(
-        `SELECT slug, start, result, price_to_beat, close_price, delta, cvd_change, bull, bear, up_start, up_end, n_trades, invested, sold, net, change_pct, end_ms, engine_version, trades_ok
+        `SELECT slug, start, result, price_to_beat, close_price, delta, cvd_change, bull, bear, up_start, up_end, n_trades, invested, sold, net, change_pct, end_ms, engine_version, trades_ok,
+                b_trades, b_invested, b_net, c_trades, c_invested, c_net
          FROM markets WHERE start >= ? AND start < ? ORDER BY start ${order} LIMIT ?`,
       )
       .all(opts.from ?? 0, opts.to ?? Number.MAX_SAFE_INTEGER, opts.limit ?? -1) as Record<string, number | string | null>[];
+    const eng = (r: Record<string, number | string | null>, e: "b" | "c") => ({
+      trades: (r[`${e}_trades`] as number | null) ?? 0,
+      invested: (r[`${e}_invested`] as number | null) ?? 0,
+      net: r[`${e}_net`] as number | null,
+    });
     return rows.map((r) => {
       return {
         slug: r.slug as string,
@@ -240,6 +254,11 @@ export class MarketStore {
         invested: r.invested as number,
         sold: r.sold as number,
         net: r.net as number | null,
+        engines: {
+          a: { trades: r.n_trades as number, invested: r.invested as number, net: r.net as number | null },
+          b: eng(r, "b"),
+          c: eng(r, "c"),
+        },
         engineVersion: r.engine_version as number | null,
         tradesOk: r.trades_ok === 1,
       };
@@ -268,6 +287,7 @@ export function summarizeRecord(r: PmRecord): Omit<PmMarketRow, "slug" | "start"
   const bull = r.signals.filter((x) => x.bias === "bullish").length;
   const firstUp = r.points.find((p) => midOf(p.upBid, p.upAsk) !== null);
   const lastUp = [...r.points].reverse().find((p) => midOf(p.upBid, p.upAsk) !== null);
+  const sum = (e?: PmEngineRun) => ({ trades: e?.trades.length ?? 0, invested: e?.pnl.invested ?? 0, net: e?.pnl.net ?? null });
   return {
     delta: r.bars.reduce((a, b) => a + b.delta, 0),
     cvdChange: r.cvd.length > 1 ? r.cvd[r.cvd.length - 1]!.cvd - r.cvd[0]!.cvd : 0,
@@ -279,6 +299,7 @@ export function summarizeRecord(r: PmRecord): Omit<PmMarketRow, "slug" | "start"
     invested: r.pnl.invested,
     sold: r.pnl.sold,
     net: r.pnl.net,
+    engines: { a: { trades: r.trades.length, invested: r.pnl.invested, net: r.pnl.net }, b: sum(r.engines?.b), c: sum(r.engines?.c) },
   };
 }
 

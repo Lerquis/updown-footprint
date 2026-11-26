@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { AggTrade, PmMarket, PmPoint } from "@updown/protocol";
-import { AsOf, SecondCvd, SyncEngine } from "./syncEngine.js";
+import { AsOf, PmFeed, SecondCvd, TimedEngine } from "./timedEngine.js";
 import { DEFAULT_STRATEGY, SignalEngine } from "./strategy.js";
 import { OrderflowEngine } from "../analysis/engine.js";
 import { DEFAULT_DETECTOR } from "../analysis/detectors.js";
@@ -57,17 +57,19 @@ test("SecondCvd: mismos puntos que el motor de orderflow para los mismos trades"
 });
 
 /** Mismos datos llegando en otro orden y con datos "del futuro" antes de decidir: las decisiones deben ser identicas. */
-test("SyncEngine: decide lo mismo aunque los datos lleguen en otro orden o haya datos posteriores a T", () => {
+test("motor asOf: decide lo mismo aunque los datos lleguen en otro orden o haya datos posteriores a T", () => {
   const cfg = { ...DEFAULT_STRATEGY, warmupS: 0 };
-  const opts = { strategy: cfg, retentionMs: 900_000, historyMax: 5, decisionsMax: 400 };
-  const a = new SyncEngine(opts);
-  const b = new SyncEngine(opts);
+  const opts = { id: "b" as const, mode: "asOf" as const, delayMs: 300, strategy: cfg, retentionMs: 900_000, decisionsMax: 400 };
+  const fa = new PmFeed();
+  const fb = new PmFeed();
+  const a = new TimedEngine(opts, fa);
+  const b = new TimedEngine(opts, fb);
   const trades: AggTrade[] = [];
   let id = 0;
   for (let t = T0 - 300_000; t < T0 + 120_000; t += 450) trades.push(trade(id++, t));
   const quotes = Array.from({ length: 240 }, (_, i) => ({ time: T0 - 1000 + i * 500 + 37, up: 0.3 + (i % 40) / 100 }));
 
-  const feed = (e: SyncEngine, until: number, ahead: number) => {
+  const feed = (e: TimedEngine, until: number, ahead: number) => {
     for (const t of trades) if (t.time < until + ahead && !(e as unknown as { fed?: Set<number> }).fed?.has(t.id)) {
       ((e as unknown as { fed?: Set<number> }).fed ??= new Set()).add(t.id);
       e.addTrade(t);
@@ -79,18 +81,18 @@ test("SyncEngine: decide lo mismo aunque los datos lleguen en otro orden o haya 
     feed(a, T, 0);
     feed(b, T, 800);
     for (const q of quotes.filter((q) => q.time <= T)) {
-      a.onQuote("u", q.up - 0.01, q.up + 0.01, q.time);
-      a.onQuote("d", 0.99 - q.up - 0.01, 0.99 - q.up + 0.01, q.time);
+      fa.onQuote("u", q.up - 0.01, q.up + 0.01, q.time);
+      fa.onQuote("d", 0.99 - q.up - 0.01, 0.99 - q.up + 0.01, q.time);
     }
     for (const q of quotes.filter((q) => q.time <= T + 800).reverse()) {
-      b.onQuote("u", q.up - 0.01, q.up + 0.01, q.time);
-      b.onQuote("d", 0.99 - q.up - 0.01, 0.99 - q.up + 0.01, q.time);
+      fb.onQuote("u", q.up - 0.01, q.up + 0.01, q.time);
+      fb.onQuote("d", 0.99 - q.up - 0.01, 0.99 - q.up + 0.01, q.time);
     }
-    a.onChainlink(T - 400, 60_000 + (T - T0) / 4000);
-    b.onChainlink(T + 600, 99_999); // posterior a T: B no debe usarlo
-    b.onChainlink(T - 400, 60_000 + (T - T0) / 4000);
-    decisions.a.push(a.step(T, market, []));
-    decisions.b.push(b.step(T, market, []));
+    fa.onChainlink(T - 400, 60_000 + (T - T0) / 4000);
+    fb.onChainlink(T + 600, 99_999); // posterior a T: un motor asOf no debe usarlo
+    fb.onChainlink(T - 400, 60_000 + (T - T0) / 4000);
+    decisions.a.push(a.step(T, market, [])?.decision ?? null);
+    decisions.b.push(b.step(T, market, [])?.decision ?? null);
   }
   assert.ok(decisions.a.every((d) => d !== null));
   assert.deepEqual(decisions.b, decisions.a);
@@ -111,4 +113,22 @@ test("decision: 'ok' exactamente cuando se emite la senal, y el edge coincide", 
   assert.equal(r2.decision.up.buy, "holding");
   assert.notEqual(r2.decision.up.sell, "flat");
   assert.equal(r2.decision.up.shares, r.signals[0]!.shares);
+});
+
+test("motor live (A): usa lo ultimo recibido aunque su marca sea posterior a T; asOf no", () => {
+  const cfg = { ...DEFAULT_STRATEGY, warmupS: 0 };
+  const feed = new PmFeed();
+  const live = new TimedEngine({ id: "a", mode: "live", delayMs: 0, strategy: cfg, retentionMs: 900_000, decisionsMax: 10 }, feed);
+  const asOf = new TimedEngine({ id: "b", mode: "asOf", delayMs: 300, strategy: cfg, retentionMs: 900_000, decisionsMax: 10 }, feed);
+  for (let i = 0; i < 400; i++) {
+    const t = trade(i, T0 - 200_000 + i * 500);
+    live.addTrade(t);
+    asOf.addTrade(t);
+  }
+  const T = T0 + 30_000;
+  feed.onQuote("u", 0.4, 0.42, T - 500);
+  feed.onQuote("u", 0.6, 0.62, T + 100); // llego "del futuro" respecto a T
+  feed.onChainlink(T - 500, 60_000);
+  assert.equal(live.step(T, market, [])?.point.upBid, 0.6);
+  assert.equal(asOf.step(T, market, [])?.point.upBid, 0.4);
 });

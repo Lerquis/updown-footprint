@@ -15,13 +15,22 @@ import {
 } from "@updown/protocol";
 import { useWsChannel, type LinkState } from "./useWsChannel";
 
+/** Muestras y senales de un motor en el market en curso */
+export interface EngineLive {
+  points: PmPoint[];
+  trades: PmSignal[];
+}
+const EMPTY_LIVE: EngineLive = { points: [], trades: [] };
+
 export interface PolymarketView {
   current: PmMarket | null;
   next: PmMarket | null;
-  /** muestras de 1 s del market en curso */
+  /** muestras de 1 s del motor A en el market en curso */
   points: PmPoint[];
-  /** senales del motor del market en curso */
+  /** senales del motor A del market en curso */
   trades: PmSignal[];
+  /** motores B y C en el market en curso */
+  engines: Record<"b" | "c", EngineLive>;
   /** terminados, antiguo -> reciente */
   history: PmRecord[];
   link: LinkState;
@@ -34,6 +43,7 @@ export function usePolymarket(): PolymarketView {
   const [next, setNext] = useState<PmMarket | null>(null);
   const [points, setPoints] = useState<PmPoint[]>([]);
   const [trades, setTrades] = useState<PmSignal[]>([]);
+  const [engines, setEngines] = useState<Record<"b" | "c", EngineLive>>({ b: EMPTY_LIVE, c: EMPTY_LIVE });
   const [history, setHistory] = useState<PmRecord[]>([]);
   const [upstream, setUpstream] = useState<UpstreamState>("connecting");
   const curStart = useRef(0);
@@ -46,6 +56,7 @@ export function usePolymarket(): PolymarketView {
         setNext(msg.next);
         setPoints(msg.points);
         setTrades(msg.trades);
+        setEngines(msg.engines);
         setHistory(msg.history);
         setUpstream(msg.upstream);
         break;
@@ -54,17 +65,30 @@ export function usePolymarket(): PolymarketView {
         if (msg.current && msg.current.start !== curStart.current) {
           setPoints([]);
           setTrades([]);
+          setEngines({ b: EMPTY_LIVE, c: EMPTY_LIVE });
         }
         curStart.current = msg.current?.start ?? 0;
         setCurrent(msg.current);
         setNext(msg.next);
         break;
-      case "point":
-        setPoints((prev) => [...prev, msg.point].slice(-400));
+      case "point": {
+        const add = (prev: PmPoint[]) => [...prev, msg.point].slice(-400);
+        if (msg.engine === "a") setPoints(add);
+        else {
+          const id = msg.engine;
+          setEngines((prev) => ({ ...prev, [id]: { ...prev[id], points: add(prev[id].points) } }));
+        }
         break;
-      case "signal":
-        setTrades((prev) => (prev.some((t) => t.id === msg.signal.id) ? prev : [...prev, msg.signal]));
+      }
+      case "signal": {
+        const add = (prev: PmSignal[]) => (prev.some((t) => t.id === msg.signal.id) ? prev : [...prev, msg.signal]);
+        if (msg.engine === "a") setTrades(add);
+        else {
+          const id = msg.engine;
+          setEngines((prev) => ({ ...prev, [id]: { ...prev[id], trades: add(prev[id].trades) } }));
+        }
         break;
+      }
       case "record":
         setHistory((prev) => {
           const i = prev.findIndex((r) => r.market.slug === msg.record.market.slug);
@@ -82,7 +106,7 @@ export function usePolymarket(): PolymarketView {
     }
   });
 
-  return { current, next, points, trades, history, link, upstream };
+  return { current, next, points, trades, engines, history, link, upstream };
 }
 
 /** Recorta el flujo de Binance (ya en el navegador) a la ventana del market en curso. */

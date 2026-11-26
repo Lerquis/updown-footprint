@@ -5,6 +5,7 @@ import { DbBackup } from "./backup.js";
  * Backup / restauracion manual (lee las mismas variables BACKUP_* que el servidor, p. ej. de .env.local):
  *   npm run backup -w @updown/server              → sube un backup de PM_DB_PATH
  *   npm run backup -w @updown/server -- restore   → descarga el ultimo backup a PM_DB_PATH (solo si no existe)
+ *   npm run backup -w @updown/server -- archive   → sube una vez la base de la generacion anterior a <prefijo>archive/
  */
 const s3 = config.backup.s3;
 if (!s3.endpoint || !s3.bucket || !s3.accessKeyId || !s3.secretAccessKey) {
@@ -14,7 +15,10 @@ if (!s3.endpoint || !s3.bucket || !s3.accessKeyId || !s3.secretAccessKey) {
 const b = new DbBackup(config.backup, config.pmDbPath);
 const cmd = process.argv[2] ?? "backup";
 try {
-  if (cmd === "restore") {
+  if (cmd === "archive") {
+    const key = await b.archiveOnce(config.pmLegacyDbPath, process.argv[3] ?? "local");
+    if (!key) console.log(`[backup] nada que archivar (¿no existe ${config.pmLegacyDbPath} o ya tiene .archived?)`);
+  } else if (cmd === "restore") {
     const ok = await b.restoreIfMissing(process.argv[3]);
     if (!ok) console.log(`[backup] no se restauro (¿ya existe ${config.pmDbPath}?)`);
   } else {

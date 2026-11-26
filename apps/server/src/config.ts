@@ -1,3 +1,12 @@
+/**
+ * Generacion de la base de datos: al cambiar el formato de lo que se guarda se empieza una base nueva
+ * (`polymarket.db` -> `polymarket-v2.db`) y otra carpeta de backups, sin tocar lo anterior. Ver ADR 0011.
+ */
+export const DB_GENERATION = "v2";
+const withGeneration = (path: string) => path.replace(/(\.db)?$/, `-${DB_GENERATION}.db`);
+const dbBase = process.env.PM_DB_PATH ?? "data/polymarket.db";
+const prefixBase = process.env.BACKUP_PREFIX ?? "updown/";
+
 const num = (v: string | undefined, d: number) => (v && !Number.isNaN(Number(v)) ? Number(v) : d);
 const bool = (v: string | undefined, d: boolean) => (v === undefined ? d : v === "1" || v.toLowerCase() === "true");
 
@@ -69,8 +78,10 @@ export const config = {
   pmMarketMs: num(process.env.PM_MARKET_MS, 5 * 60_000),
   /** Markets terminados que se guardan en memoria (24 x 5 min = 2 h) */
   pmHistory: num(process.env.PM_HISTORY, 24),
-  /** Base de datos SQLite de markets completos (relativa al directorio del servidor) */
-  pmDbPath: process.env.PM_DB_PATH ?? "data/polymarket.db",
+  /** Base de datos SQLite de markets completos (relativa al directorio del servidor): PM_DB_PATH con la generacion, p. ej. data/polymarket-v2.db */
+  pmDbPath: withGeneration(dbBase),
+  /** Base de la generacion anterior (PM_DB_PATH tal cual): si existe, se archiva una vez en el bucket y no se vuelve a tocar */
+  pmLegacyDbPath: dbBase,
 
   // ── Backups de la base a un bucket S3/R2 (ver docs/guides/deployment.md). Desactivado si falta el bucket. ──
   backup: {
@@ -81,7 +92,10 @@ export const config = {
       secretAccessKey: process.env.BACKUP_S3_SECRET_ACCESS_KEY ?? "",
       region: process.env.BACKUP_S3_REGION ?? "auto",
     },
-    prefix: process.env.BACKUP_PREFIX ?? "updown/",
+    /** carpeta de los backups de esta generacion (p. ej. updown/v2/) */
+    prefix: `${prefixBase}${DB_GENERATION}/`,
+    /** carpeta del archivo final de la base anterior (p. ej. updown/archive/) */
+    archivePrefix: `${prefixBase}archive/`,
     intervalMs: num(process.env.BACKUP_INTERVAL_H, 24) * 3600_000,
     /** Programar backups periodicos (false: solo restaurar / backups manuales) */
     enabled: bool(process.env.BACKUP_ENABLED, true),
@@ -107,7 +121,13 @@ export const config = {
   pmFlowGain: num(process.env.PM_FLOW_GAIN, 0.3),
   pmWarmupS: num(process.env.PM_WARMUP_S, 20),
   pmNoEntryS: num(process.env.PM_NO_ENTRY_S, 10),
-  /** Motor B (sincronizado, solo en memoria): decide cada segundo de Binance + este retraso (ms) para dar tiempo a llegar a los datos */
-  pmSyncEnabled: bool(process.env.PM_SYNC_ENABLED, true),
-  pmSyncDelayMs: num(process.env.PM_SYNC_DELAY_MS, 300),
+  /**
+   * Motores A, B y C (docs/features/engines.md): deciden cada segundo de Binance + este retraso (ms).
+   * A con lo ultimo recibido (lo antes posible); B y C con datos "a fecha" del segundo.
+   */
+  pmEngineDelayMs: {
+    a: num(process.env.PM_ENGINE_A_DELAY_MS, 0),
+    b: num(process.env.PM_ENGINE_B_DELAY_MS, 300),
+    c: num(process.env.PM_ENGINE_C_DELAY_MS, 150),
+  },
 } as const;
