@@ -5,12 +5,15 @@ import type { PmMarketRow, PmPnl, PmRecord, PmSignal } from "@updown/protocol";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { exchangeClock } from "@/lib/exchangeClock";
 import { fmtClockHM, fmtDayShort } from "@/lib/flow";
 import type { OrderflowView } from "@/lib/useOrderflow";
 import { useFetchRecord, useMarketRows } from "@/lib/useMarketRows";
 import { sliceFlow, type PolymarketView } from "@/lib/usePolymarket";
+import { useEngines } from "@/lib/useEngines";
+import { EnginesDrawer } from "./EnginesDrawer";
 import { LiveBadge } from "./LiveBadge";
 import { PolymarketChart } from "./PolymarketChart";
 
@@ -106,6 +109,10 @@ export function PolymarketPanel({ pm, flow }: { pm: PolymarketView; flow: Orderf
   const [fetching, setFetching] = useState(false);
   const [page, setPage] = useState(0);
   const fetchRecord = useFetchRecord();
+  // Motores A/B: el canal solo se abre con el drawer abierto o con el motor B visible en el grafico
+  const [enginesOpen, setEnginesOpen] = useState(false);
+  const [showB, setShowB] = useState(false);
+  const eng = useEngines(enginesOpen || showB);
   const [now, setNow] = useState(() => exchangeClock.now());
   useEffect(() => {
     const id = setInterval(() => setNow(exchangeClock.now()), 500);
@@ -154,6 +161,7 @@ export function PolymarketPanel({ pm, flow }: { pm: PolymarketView; flow: Orderf
   const pageRows = mk.rows.slice(curPage * PAGE_SIZE, (curPage + 1) * PAGE_SIZE);
 
   const m = view?.market ?? null;
+  const tradesB = !showB || !m ? undefined : eng.b.slug === m.slug ? eng.b.trades : eng.bHistory.find((h) => h.slug === m.slug)?.trades;
   const last = view?.points[view.points.length - 1];
   // Referencia para la diferencia con el price to beat: Chainlink ahora (en vivo) o el cierre oficial
   const ref = m ? (isLive ? (last?.chainlink ?? null) : (m.closePrice ?? last?.chainlink ?? null)) : null;
@@ -169,7 +177,13 @@ export function PolymarketPanel({ pm, flow }: { pm: PolymarketView; flow: Orderf
           Market en curso y todos los markets guardados en la base de datos ({mk.total}). Selecciona uno para ver el precio de los
           tokens Up/Down con las señales de Binance marcadas, y el CVD y delta de esos 5 minutos.
         </CardDescription>
-        <CardAction>
+        <CardAction className="flex items-center gap-3">
+          <label className="flex items-center gap-1.5 text-[11px] text-muted-foreground" title="Dibuja en el gráfico las operaciones del motor B (sincronizado) para compararlas con las del A">
+            <Switch size="sm" checked={showB} onCheckedChange={setShowB} /> Motor B
+          </label>
+          <Button size="sm" variant="outline" onClick={() => setEnginesOpen(true)}>
+            Motores
+          </Button>
           <LiveBadge label="Polymarket" link={pm.link} upstream={pm.upstream} />
         </CardAction>
       </CardHeader>
@@ -241,9 +255,10 @@ export function PolymarketPanel({ pm, flow }: { pm: PolymarketView; flow: Orderf
             </div>
 
             <div className="rounded-md border">
-              <PolymarketChart market={m} points={view.points} bars={view.bars} cvd={view.cvd} signals={view.signals} trades={view.trades} />
+              <PolymarketChart market={m} points={view.points} bars={view.bars} cvd={view.cvd} signals={view.signals} trades={view.trades} tradesB={tradesB} />
             </div>
             <TradesList trades={view.trades} start={m.start} />
+            {showB && !tradesB && <p className="text-[11px] text-muted-foreground">El motor B no tiene datos de este market (solo vive en memoria desde que arrancó el servidor).</p>}
             {!isLive && (
               <p className="text-[11px] text-muted-foreground">
                 Resultado del motor en este market: invertido {view.pnl.invested.toFixed(2)} · vendido {view.pnl.sold.toFixed(2)} · neto{" "}
@@ -335,6 +350,7 @@ export function PolymarketPanel({ pm, flow }: { pm: PolymarketView; flow: Orderf
           </div>
         )}
       </CardContent>
+      <EnginesDrawer open={enginesOpen} onOpenChange={setEnginesOpen} eng={eng} history={pm.history} marketStart={pm.current?.start ?? 0} />
     </Card>
   );
 }

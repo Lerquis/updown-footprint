@@ -4,7 +4,8 @@ import { ReconnectingWs } from "./reconnectingWs.js";
 
 export interface BookEvents {
   /** mejor bid/ask de un token (probabilidad 0-1) */
-  quote: [{ token: string; bid: number | null; ask: number | null }];
+  /** `time`: marca de tiempo del mensaje de Polymarket (ms), null si no viene */
+  quote: [{ token: string; bid: number | null; ask: number | null; time: number | null }];
   state: [UpstreamState];
 }
 
@@ -15,6 +16,7 @@ interface Level {
 interface RawEvent {
   event_type?: string;
   asset_id?: string;
+  timestamp?: string | number;
   bids?: Level[];
   asks?: Level[];
   price_changes?: { asset_id: string; best_bid?: string; best_ask?: string }[];
@@ -36,12 +38,14 @@ export class BookClient extends EventEmitter<BookEvents> {
   }
 
   private handle(ev: RawEvent) {
+    const ts = Number(ev.timestamp);
+    const time = Number.isFinite(ts) && ts > 0 ? (ts < 1e12 ? ts * 1000 : ts) : null;
     if (ev.event_type === "book" && ev.asset_id) {
       const bid = ev.bids?.length ? Math.max(...ev.bids.map((l) => Number(l.price))) : null;
       const ask = ev.asks?.length ? Math.min(...ev.asks.map((l) => Number(l.price))) : null;
-      this.emit("quote", { token: ev.asset_id, bid, ask });
+      this.emit("quote", { token: ev.asset_id, bid, ask, time });
     } else if (ev.event_type === "price_change" && ev.price_changes) {
-      for (const c of ev.price_changes) this.emit("quote", { token: c.asset_id, bid: n(c.best_bid), ask: n(c.best_ask) });
+      for (const c of ev.price_changes) this.emit("quote", { token: c.asset_id, bid: n(c.best_bid), ask: n(c.best_ask), time });
     }
   }
 

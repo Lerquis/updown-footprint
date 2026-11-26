@@ -1,4 +1,4 @@
-import type { PmMarket, PmPnl, PmPoint, PmSide, PmSignal } from "@updown/protocol";
+import type { PmBlock, PmDecision, PmMarket, PmPnl, PmPoint, PmSide, PmSideDecision, PmSignal } from "@updown/protocol";
 import { blend, DEFAULT_MODEL, modelProbUp, takerFee, type ModelConfig } from "./model.js";
 
 /**
@@ -64,6 +64,14 @@ interface Position {
 }
 
 const round = (v: number, d = 4) => Math.round(v * 10 ** d) / 10 ** d;
+const r4 = (v: number | null) => (v === null ? null : round(v));
+
+/** Resultado de un segundo: probabilidad, senales y el registro de por que (solo informativo: no cambia la decision). */
+export interface StepResult {
+  pUp: number | null;
+  signals: PmSignal[];
+  decision: PmDecision;
+}
 
 /** Estado de decisiones de UN market. Se crea al empezar el market y recibe un punto por segundo. */
 export class SignalEngine {
@@ -83,11 +91,15 @@ export class SignalEngine {
    * Procesa el punto del segundo. Devuelve la probabilidad de Up (o null si falta algun dato) y las senales
    * emitidas. El punto debe traer `chainlink`, `binance`, `basis`, `sigma` y `flow` (los pone el tracker).
    */
-  step(p: PmPoint): { pUp: number | null; signals: PmSignal[] } {
+  step(p: PmPoint): StepResult {
     const m = this.market;
     const { model } = this.cfg;
     const k = m.priceToBeat;
-    if (k === null || p.binance === null || p.basis === null || p.sigma === null || p.time >= m.end) return { pUp: null, signals: [] };
+    const tau0 = (m.end - p.time) / 1000;
+    if (k === null || p.binance === null || p.basis === null || p.sigma === null || p.time >= m.end) {
+      const side = (s: PmSide): PmSideDecision => ({ shares: round(this.pos[s].shares, 3), buyEdge: null, buy: "noData", sellEdge: null, sell: this.pos[s].shares > 0 ? "noData" : "flat" });
+      return { pUp: null, signals: [], decision: this.record(p, tau0, null, null, null, side("up"), side("down"), []) };
+    }
 
     const x = p.binance + p.basis;
     const tau = (m.end - p.time) / 1000;
@@ -102,12 +114,42 @@ export class SignalEngine {
 
     const pModel = modelProbUp({ x, k, tau, sigma: p.sigma, tailAvg: this.tail.n ? this.tail.sum / this.tail.n : null, flow: p.flow ?? 0 }, model);
     const pUp = blend(pModel, pMarket, model.modelWeight);
-    return { pUp, signals: this.decide(p, pUp, tau) };
+    const ev: Record<PmSide, PmSideDecision> = {
+      up: { shares: round(this.pos.up.shares, 3), buyEdge: null, buy: "ok", sellEdge: null, sell: "flat" },
+      down: { shares: round(this.pos.down.shares, 3), buyEdge: null, buy: "ok", sellEdge: null, sell: "flat" },
+    };
+    const signals = this.decide(p, pUp, tau, ev);
+    return { pUp, signals, decision: this.record(p, tau, pModel, pMarket, pUp, ev.up, ev.down, signals) };
   }
 
-  private decide(p: PmPoint, pUp: number, tau: number): PmSignal[] {
+  private record(p: PmPoint, tau: number, pModel: number | null, pMarket: number | null, pUp: number | null, up: PmSideDecision, down: PmSideDecision, signals: PmSignal[]): PmDecision {
+    return {
+      time: p.time,
+      tau: round(tau, 1),
+      chainlink: p.chainlink,
+      upBid: p.upBid,
+      upAsk: p.upAsk,
+      downBid: p.downBid,
+      downAsk: p.downAsk,
+      pModel: r4(pModel),
+      pMarket: r4(pMarket),
+      pUp: r4(pUp),
+      up,
+      down,
+      signals,
+    };
+  }
+
+  /**
+   * Reglas de decision. `ev` recibe, por lado, los edges y el primer impedimento encontrado (o "ok");
+   * se rellena sin alterar el orden ni el resultado de las comprobaciones.
+   */
+  private decide(p: PmPoint, pUp: number, tau: number, ev: Record<PmSide, PmSideDecision>): PmSignal[] {
     const c = this.cfg;
     const out: PmSignal[] = [];
+    const block = (side: PmSide, b: PmBlock) => {
+      if (ev[side].buy === "ok") ev[side].buy = b;
+    };
     const quote = {
       up: { bid: p.upBid, ask: p.upAsk },
       down: { bid: p.downBid, ask: p.downAsk },
@@ -120,29 +162,65 @@ export class SignalEngine {
     for (const side of ["up", "down"] as const) {
       const pos = this.pos[side];
       const bid = quote[side].bid;
-      if (pos.shares <= 0 || bid === null || bid <= 0) continue;
+      if (pos.shares <= 0) continue;
+      if (bid === null || bid <= 0) {
+        ev[side].sell = "noQuote";
+        continue;
+      }
       const sellValue = bid - takerFee(bid, c.feeRate) - c.slippage;
       const edge = sellValue - prob[side];
-      if (edge < c.exitMargin || p.time - this.lastSignal[side] < c.cooldownS * 1000) continue;
+      ev[side].sellEdge = round(edge);
+      if (edge < c.exitMargin || p.time - this.lastSignal[side] < c.cooldownS * 1000) {
+        ev[side].sell = edge < c.exitMargin ? "edge" : "cooldown";
+        continue;
+      }
+      ev[side].sell = "ok";
       sold[side] = true;
       out.push(this.sell(p, side, bid, edge, prob[side], tau));
     }
 
     // 2) compras: EV neto > margen, con spread razonable, fuera de calentamiento y de los segundos finales
+    // (informativo) edge de compra de cada lado con su ask, aunque luego no se pueda comprar
+    for (const side of ["up", "down"] as const) {
+      const ask = quote[side].ask;
+      if (ask !== null && ask > 0 && ask < 1) ev[side].buyEdge = round(prob[side] - (ask + takerFee(ask, c.feeRate) + c.slippage));
+    }
     const elapsed = (this.market.end - this.market.start) / 1000 - tau;
-    if (elapsed < c.warmupS || tau < c.noEntryS || this.entries >= c.maxEntries) return out;
+    const globalBlock: PmBlock | null = elapsed < c.warmupS ? "warmup" : tau < c.noEntryS ? "closing" : this.entries >= c.maxEntries ? "maxEntries" : null;
+    if (globalBlock) {
+      for (const side of ["up", "down"] as const) block(side, quote[side].ask === null ? "noQuote" : globalBlock);
+      return out;
+    }
     for (const side of ["up", "down"] as const) {
       const { bid, ask } = quote[side];
-      if (ask === null || ask <= 0 || ask >= 1 || sold[side]) continue;
-      if (bid !== null && ask - bid > c.maxSpread) continue;
-      if (this.pos[side].shares > 0) continue; // sin pirámide: una entrada por lado
-      if (p.time - this.lastSignal[side] < c.cooldownS * 1000) continue;
+      if (ask === null || ask <= 0 || ask >= 1 || sold[side]) {
+        block(side, sold[side] ? "justSold" : "noQuote");
+        continue;
+      }
+      if (bid !== null && ask - bid > c.maxSpread) {
+        block(side, "spread");
+        continue;
+      }
+      if (this.pos[side].shares > 0) {
+        block(side, "holding");
+        continue; // sin pirámide: una entrada por lado
+      }
+      if (p.time - this.lastSignal[side] < c.cooldownS * 1000) {
+        block(side, "cooldown");
+        continue;
+      }
       const cost = ask + takerFee(ask, c.feeRate) + c.slippage;
       const edge = prob[side] - cost;
-      if (edge < c.minEdge) continue;
+      if (edge < c.minEdge) {
+        block(side, "edge");
+        continue;
+      }
       const kelly = edge / (1 - cost);
       const stake = Math.min(c.kellyFraction * kelly * c.bankroll, c.maxStakePct * c.bankroll, c.maxMarketPct * c.bankroll - this.spent);
-      if (stake < c.minStake) continue;
+      if (stake < c.minStake) {
+        block(side, "stake");
+        continue;
+      }
       const reason = this.pos[other[side]].shares > 0 ? "hedge" : sold[other[side]] ? "flip" : "entry";
       out.push(this.buy(p, side, ask, cost, stake, edge, prob[side], tau, reason));
     }

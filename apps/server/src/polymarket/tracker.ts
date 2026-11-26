@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import type { CvdPoint, FootprintBar, OrderflowSignal, PmMarket, PmPoint, PmRecord, PmSignal, UpstreamState } from "@updown/protocol";
+import type { CvdPoint, FootprintBar, OrderflowSignal, PmDecision, PmMarket, PmPoint, PmRecord, PmSignal, UpstreamState } from "@updown/protocol";
 import type { PolymarketApi } from "./api.js";
 import { flowContext } from "./model.js";
 import { computePnl, DEFAULT_STRATEGY, SignalEngine, type StrategyConfig } from "./strategy.js";
@@ -11,12 +11,20 @@ export interface FlowSource {
   signals(): OrderflowSignal[];
 }
 
+/** Mejor bid/ask de un token; `time` = marca de tiempo de Polymarket (ms) si la trae el mensaje */
+export interface BookQuote {
+  token: string;
+  bid: number | null;
+  ask: number | null;
+  time?: number | null;
+}
+
 /** Lo minimo que el tracker necesita de un cliente de libro (BookClient o un doble en pruebas). */
 export interface BookLike {
   readonly state: UpstreamState;
   start(): void;
   stop(): void;
-  on(event: "quote", cb: (q: { token: string; bid: number | null; ask: number | null }) => void): unknown;
+  on(event: "quote", cb: (q: BookQuote) => void): unknown;
   on(event: "state", cb: (s: UpstreamState) => void): unknown;
 }
 
@@ -45,6 +53,10 @@ export interface TrackerEvents {
   point: [PmPoint];
   /** senal de compra/venta del motor */
   signal: [PmSignal];
+  /** por que decidio el motor lo que decidio en ese segundo (slug del market, decision) */
+  decision: [string, PmDecision];
+  /** cotizacion recibida del libro del market en curso (para el motor sincronizado) */
+  quote: [BookQuote];
   /** market archivado o con resultado actualizado */
   record: [PmRecord];
   /** estado de la conexion con el libro de Polymarket */
@@ -234,7 +246,9 @@ export class PolymarketTracker extends EventEmitter<TrackerEvents> {
     this.bookFor = m.slug;
     const book = this.makeBook([m.upToken, m.downToken]);
     book.on("quote", (q) => {
-      if (this.book === book) this.quotes.set(q.token, { bid: q.bid, ask: q.ask });
+      if (this.book !== book) return;
+      this.quotes.set(q.token, { bid: q.bid, ask: q.ask });
+      this.emit("quote", q);
     });
     book.on("state", (st) => {
       if (this.book === book) this.emit("status", st);
@@ -263,6 +277,7 @@ export class PolymarketTracker extends EventEmitter<TrackerEvents> {
     };
     const r = this.engine?.step(point);
     point.pModel = r?.pUp ?? null;
+    if (r) this.emit("decision", m.slug, r.decision);
     for (const sig of r?.signals ?? []) {
       this.trades.push(sig);
       this.emit("signal", sig);

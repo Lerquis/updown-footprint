@@ -107,4 +107,7 @@ export const config = {
   pmFlowGain: num(process.env.PM_FLOW_GAIN, 0.3),
   pmWarmupS: num(process.env.PM_WARMUP_S, 20),
   pmNoEntryS: num(process.env.PM_NO_ENTRY_S, 10),
+  /** Motor B (sincronizado, solo en memoria): decide cada segundo de Binance + este retraso (ms) para dar tiempo a llegar a los datos */
+  pmSyncEnabled: bool(process.env.PM_SYNC_ENABLED, true),
+  pmSyncDelayMs: num(process.env.PM_SYNC_DELAY_MS, 300),
 } as const;

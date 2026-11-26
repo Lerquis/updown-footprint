@@ -27,6 +27,7 @@ export const CHANNELS = {
   orderflow: "/ws/orderflow",
   analysis: "/ws/analysis",
   polymarket: "/ws/polymarket",
+  engines: "/ws/engines",
 } as const;
 
 // ───────────────────────── Canal aggTrades ─────────────────────────
@@ -584,3 +585,100 @@ export type PolymarketServerMessage =
   /** market terminado (o su resultado actualizado): el cliente hace upsert por slug */
   | { type: "record"; record: PmRecord }
   | { type: "status"; upstream: UpstreamState };
+
+// ───────────────────────── Canal engines (decisiones de los motores A y B) ─────────────────────────
+
+/**
+ * a: motor principal (muestrea con el reloj interno del servidor; es el que se guarda en la base de datos).
+ * b: motor sincronizado (mismas reglas; decide en el segundo exacto del reloj de Binance con datos "a fecha"
+ *    de ese segundo, para que servidores distintos tomen las mismas decisiones). Solo en memoria.
+ */
+export type PmEngineId = "a" | "b";
+
+/**
+ * Por que un lado se compra / vende (ok) o no en ese segundo. Se informa el primer impedimento, en el orden en que el motor los evalua:
+ * noData sin datos para el modelo · flat sin posicion (venta) · noQuote sin precio · warmup calentando · closing ultimos segundos ·
+ * maxEntries tope de compras · justSold acaba de vender ese lado · spread demasiado ancho · holding ya tiene ese lado ·
+ * cooldown espera tras la ultima senal · edge EV por debajo del umbral · stake importe minimo / tope por market.
+ */
+export type PmBlock =
+  | "ok"
+  | "noData"
+  | "flat"
+  | "noQuote"
+  | "warmup"
+  | "closing"
+  | "maxEntries"
+  | "justSold"
+  | "spread"
+  | "holding"
+  | "cooldown"
+  | "edge"
+  | "stake";
+
+/** Evaluacion de un lado (Up o Down) en un segundo. Edges en USDC por token. */
+export interface PmSideDecision {
+  /** tokens en cartera antes de decidir */
+  shares: number;
+  /** P(lado) - coste de compra (ask + comision + deslizamiento); null sin ask */
+  buyEdge: number | null;
+  buy: PmBlock;
+  /** (bid - comision - deslizamiento) - P(lado); solo con posicion */
+  sellEdge: number | null;
+  sell: PmBlock;
+}
+
+/** Registro de una decision de un motor (un segundo): entradas, probabilidades, evaluacion y senales emitidas. */
+export interface PmDecision {
+  /** reloj de Binance, ms */
+  time: number;
+  /** segundos hasta el cierre */
+  tau: number;
+  chainlink: number | null;
+  upBid: number | null;
+  upAsk: number | null;
+  downBid: number | null;
+  downAsk: number | null;
+  /** probabilidad de Up: solo el modelo, implicita del mercado, y la mezcla con que decide */
+  pModel: number | null;
+  pMarket: number | null;
+  pUp: number | null;
+  up: PmSideDecision;
+  down: PmSideDecision;
+  /** senales emitidas en este segundo (normalmente ninguna) */
+  signals: PmSignal[];
+}
+
+/** Umbrales con que deciden ambos motores (para leer las decisiones) */
+export interface PmEngineThresholds {
+  minEdge: number;
+  exitMargin: number;
+  maxSpread: number;
+  warmupS: number;
+  noEntryS: number;
+}
+
+/** Operaciones del motor B en un market ya terminado (en memoria del servidor; no se guardan en la base) */
+export interface PmEngineMarket {
+  slug: string;
+  trades: PmSignal[];
+}
+
+export type EnginesServerMessage =
+  | {
+      type: "snapshot";
+      /** market en curso de cada motor (null hasta el primero) */
+      slug: string | null;
+      thresholds: PmEngineThresholds;
+      /** retraso (ms) tras cada segundo de Binance con que decide el motor B */
+      syncDelayMs: number;
+      /** decisiones del market en curso, antiguo -> reciente */
+      a: PmDecision[];
+      b: PmDecision[];
+      /** operaciones del motor B en los ultimos markets terminados, antiguo -> reciente */
+      bHistory: PmEngineMarket[];
+    }
+  /** nueva decision de un motor; si cambia `slug`, empieza un market nuevo (el cliente vacia ese motor) */
+  | { type: "decision"; engine: PmEngineId; slug: string; decision: PmDecision }
+  /** el motor B termino un market (para su historial) */
+  | { type: "bMarket"; market: PmEngineMarket };

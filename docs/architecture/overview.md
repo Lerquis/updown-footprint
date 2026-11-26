@@ -24,6 +24,7 @@ El servidor es el **único consumidor** de datos de mercado y el **único dueño
 | `PolymarketTracker` (`server/src/polymarket/tracker.ts`) | Rota el market de 5 min con el reloj de Binance, muestrea Chainlink y los precios de los tokens Up/Down cada segundo y archiva cada market terminado con su footprint/CVD/señales |
 | `detectors.ts` | Funciones puras: desequilibrios, apilados, absorción, agotamiento, divergencia de CVD |
 | `SignalEngine` (`server/src/polymarket/strategy.ts`) + `model.ts` | Probabilidad de Up (precio, price to beat, tiempo, volatilidad, flujo) → señales de compra/venta con EV neto de comisión; ver [signal-engine](../features/signal-engine.md) |
+| `SyncEngine` (`polymarket/syncEngine.ts`) | Motor B: mismas reglas, decide en el segundo exacto de Binance con datos "a fecha"; solo en memoria → `/ws/engines` junto a las decisiones del A ([engine-sync](../features/engine-sync.md)) |
 | `MarketStore` (`polymarket/store.ts`) + `rebuild.ts` | SQLite (`node:sqlite`): markets resueltos y completos, más todos los aggTrades y las columnas del heatmap en continuo; `rebuildOrderflow` rehace footprint/CVD/señales |
 | `DbBackup` (`backup/`) | Copia periódica de la base a S3/R2 y restauración al arrancar sin base ([deployment.md](../guides/deployment.md)) |
 | `AnalysisMonitor` + `scenarios.ts` | Tendencias de precio/CVD + señales recientes → escenarios activos, score y sesgo |

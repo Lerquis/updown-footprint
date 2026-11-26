@@ -13,6 +13,8 @@ interface Props {
   signals: OrderflowSignal[];
   /** senales de compra/venta del motor */
   trades: PmSignal[];
+  /** operaciones del motor B (sincronizado), para compararlas; se dibujan huecas */
+  tradesB?: PmSignal[];
 }
 
 const PAD_L = 8;
@@ -53,7 +55,7 @@ const fmtCents = (v: number | null) => (v === null ? "–" : `${(v * 100).toFixe
  * más CVD y delta por barra footprint, todo sobre el mismo eje de tiempo (la ventana de 5 min).
  * SVG: son pocos puntos (≤ 300).
  */
-export function PolymarketChart({ market, points, bars, cvd, signals, trades }: Props) {
+export function PolymarketChart({ market, points, bars, cvd, signals, trades, tradesB = [] }: Props) {
   const ref = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(800);
   const [hover, setHover] = useState<number | null>(null);
@@ -222,6 +224,24 @@ export function PolymarketChart({ market, points, bars, cvd, signals, trades }: 
               {buy ? <path d={`M${x},${y - 8}L${x - 6},${y + 4}L${x + 6},${y + 4}Z`} className="stroke-background" strokeWidth={1} /> : <path d={`M${x},${y + 8}L${x - 6},${y - 4}L${x + 6},${y - 4}Z`} className="stroke-background" strokeWidth={1} />}
               <text x={x} y={buy ? y + 16 : y - 11} textAnchor="middle" className="stroke-none text-[9px] font-bold">
                 {`${buy ? "C" : "V"} ${up ? "Up" : "Dn"} ${(t.price * 100).toFixed(0)}¢`}
+              </text>
+            </g>
+          );
+        })}
+
+        {/* Motor B (sincronizado): marcas huecas con la etiqueta al otro lado que las de A */}
+        {tradesB.map((t) => {
+          const v = t.side === "up" ? t.price : 1 - t.price;
+          const x = xOf(t.time);
+          const y = yProb(Math.min(data.prHi, Math.max(data.prLo, v)));
+          const buy = t.action === "buy";
+          const up = t.side === "up";
+          return (
+            <g key={`B${t.id}`} className={up ? "stroke-buy fill-buy" : "stroke-sell fill-sell"}>
+              <title>{`Motor B · ${buy ? "COMPRAR" : "VENDER"} ${up ? "Up" : "Down"} a ${(t.price * 100).toFixed(0)}¢ (${t.reason}) · ${fmtClockHM(t.time)} · ${t.shares} tokens · ${t.amount} USDC · edge ${(t.edge * 100).toFixed(1)}¢`}</title>
+              {buy ? <path d={`M${x},${y - 8}L${x - 6},${y + 4}L${x + 6},${y + 4}Z`} className="fill-none" strokeWidth={1.4} /> : <path d={`M${x},${y + 8}L${x - 6},${y - 4}L${x + 6},${y - 4}Z`} className="fill-none" strokeWidth={1.4} />}
+              <text x={x} y={buy ? y - 11 : y + 16} textAnchor="middle" className="stroke-none text-[9px] font-bold opacity-80">
+                {`B ${buy ? "C" : "V"} ${up ? "Up" : "Dn"} ${(t.price * 100).toFixed(0)}¢`}
               </text>
             </g>
           );

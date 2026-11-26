@@ -11,13 +11,18 @@ export type LinkState = "connecting" | "open" | "closed";
 /**
  * Conexion a un canal WS del servidor con reconexion exponencial.
  * `onMessage` puede cambiar entre renders sin reconectar. Devuelve el estado del enlace.
+ * Con `path` null no se conecta (canales que solo se piden bajo demanda, p. ej. al abrir un panel).
  */
-export function useWsChannel<T>(path: string, onMessage: (msg: T) => void): LinkState {
+export function useWsChannel<T>(path: string | null, onMessage: (msg: T) => void): LinkState {
   const [link, setLink] = useState<LinkState>("connecting");
   const handler = useRef(onMessage);
   handler.current = onMessage;
 
   useEffect(() => {
+    if (path === null) {
+      setLink("closed");
+      return;
+    }
     let ws: WebSocket | undefined;
     let retry: ReturnType<typeof setTimeout> | undefined;
     let attempt = 0;

@@ -8,6 +8,7 @@
 | Monitor de escenarios | Implementada (ya no se muestra en el dashboard; lo reemplaza el motor de señales) | [scenario-monitor.md](scenario-monitor.md) |
 | Motor de señales de compra/venta Up/Down 5m + base de datos de markets | Implementada | [signal-engine.md](signal-engine.md) |
 | Markets Polymarket BTC Up/Down 5m (en vivo + historial) | Implementada | [polymarket-markets.md](polymarket-markets.md) |
+| Motores A y B (sincronizado) y drawer de decisiones | Implementada | [engine-sync.md](engine-sync.md) |
 
 ## Formato de un feature doc
 `# Nombre` · **Estado** · **Objetivo** · **Servidor** (archivos/flujo) · **Frontend** (archivos) · **Protocolo** (enlace a `protocol.md`) · **Pendiente / ideas**.

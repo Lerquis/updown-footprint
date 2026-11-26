@@ -6,7 +6,9 @@ import {
   type AggTradesServerMessage,
   type AnalysisServerMessage,
   type DepthServerMessage,
+  type EnginesServerMessage,
   type OrderflowServerMessage,
+  type PmDecision,
   type PmMarketsResponse,
   type PolymarketServerMessage,
   type UpstreamState,
@@ -32,6 +34,8 @@ import { ENGINE_VERSION, MarketStore } from "./polymarket/store.js";
 import { DEFAULT_MODEL } from "./polymarket/model.js";
 import { DEFAULT_STRATEGY } from "./polymarket/strategy.js";
 import { DbBackup } from "./backup/backup.js";
+import { SyncEngine } from "./polymarket/syncEngine.js";
+import { slotStart } from "./polymarket/tracker.js";
 
 const SYMBOL = config.symbol.toUpperCase();
 
@@ -113,6 +117,12 @@ const tracker = new PolymarketTracker(
   },
 );
 tracker.restore(marketStore.recent(config.pmHistory));
+// Motor B: mismas reglas, decision en el segundo exacto de Binance con datos "a fecha"; solo en memoria (no se guarda)
+const syncEngine = config.pmSyncEnabled
+  ? new SyncEngine({ strategy, retentionMs: config.retentionMs, historyMax: config.pmHistory, decisionsMax: Math.ceil(config.pmMarketMs / 1000) + 10 })
+  : null;
+/** Decisiones del motor A en el market en curso (para el canal engines; el market se guarda aparte con sus senales) */
+const engineA = { slug: null as string | null, decisions: [] as PmDecision[] };
 console.log(`[polymarket] db ${config.pmDbPath}: ${marketStore.count()} markets completos guardados, ${marketStore.counts().trades} aggTrades, ${tracker.history.length} cargados`);
 
 // ── Canales (uno por tipo de dato; cada uno envia snapshot al conectar) ──
@@ -162,6 +172,16 @@ const polymarket = new Channel<PolymarketServerMessage>(() => ({
   upstream: pmUpstream(),
 }));
 
+const engines = new Channel<EnginesServerMessage>(() => ({
+  type: "snapshot",
+  slug: engineA.slug,
+  thresholds: { minEdge: strategy.minEdge, exitMargin: strategy.exitMargin, maxSpread: strategy.maxSpread, warmupS: strategy.warmupS, noEntryS: strategy.noEntryS },
+  syncDelayMs: config.pmSyncDelayMs,
+  a: engineA.decisions.slice(),
+  b: syncEngine?.decisions.slice() ?? [],
+  bHistory: syncEngine?.history.slice() ?? [],
+}));
+
 // ── Tuberia de trades: relleno historico + vivo, sin duplicados ──
 let ready = false;
 let lastId = 0;
@@ -173,6 +193,7 @@ const ingest = (t: AggTrade) => {
   buffer.push(t);
   marketStore.addTrade(t);
   engine.ingest(t);
+  syncEngine?.addTrade(t);
   if (ready) aggTrades.broadcast({ type: "trade", trade: t });
 };
 
@@ -189,7 +210,23 @@ upstream.on("state", (s) => {
 });
 depthClient.on("state", (s) => depth.broadcast({ type: "status", upstream: s }));
 
-chainlink.on("price", (p) => tracker.setChainlink(p.value));
+chainlink.on("price", (p) => {
+  tracker.setChainlink(p.value);
+  syncEngine?.onChainlink(p.time, p.value);
+});
+// sin marca de tiempo de Polymarket, se usa la hora de llegada (reloj de Binance estimado)
+tracker.on("quote", (q) => syncEngine?.onQuote(q.token, q.bid, q.ask, q.time ?? clock.now()));
+tracker.on("decision", (slug, decision) => {
+  if (engineA.slug !== slug) {
+    engineA.slug = slug;
+    engineA.decisions = [];
+  }
+  engineA.decisions.push(decision);
+  if (engineA.decisions.length > Math.ceil(config.pmMarketMs / 1000) + 10) engineA.decisions.shift();
+  engines.broadcast({ type: "decision", engine: "a", slug, decision });
+});
+syncEngine?.on("decision", (slug, decision) => engines.broadcast({ type: "decision", engine: "b", slug, decision }));
+syncEngine?.on("market", (market) => engines.broadcast({ type: "bMarket", market }));
 const pmStatus = () => polymarket.broadcast({ type: "status", upstream: pmUpstream() });
 tracker.on("status", pmStatus);
 chainlink.on("state", pmStatus);
@@ -231,6 +268,26 @@ const flowSampler = setInterval(() => {
   if (r.changed) analysis.broadcast({ type: "change", summary: r.summary });
 }, 1000);
 
+// Motor B: un paso por segundo de Binance, disparado `pmSyncDelayMs` despues de que empiece el segundo siguiente
+// (en todos los servidores en el mismo instante de Binance, no segun su reloj interno). Recupera segundos si el timer se retrasa.
+let syncTimer: ReturnType<typeof setTimeout> | undefined;
+let syncLast = 0;
+const syncMarket = (T: number) => {
+  const slot = slotStart(T, config.pmMarketMs);
+  return tracker.current?.start === slot ? tracker.current : tracker.next?.start === slot ? tracker.next : null;
+};
+const syncLoop = () => {
+  const now = clock.now();
+  const T = Math.floor((now - config.pmSyncDelayMs) / 1000) * 1000;
+  if (ready && syncEngine) {
+    if (!syncLast || T - syncLast > 5000) syncLast = T - 1000;
+    for (let t = syncLast + 1000; t <= T; t += 1000) syncEngine.step(t, syncMarket(t), engine.signals);
+    syncLast = T;
+  }
+  syncTimer = setTimeout(syncLoop, Math.max(50, T + 1000 + config.pmSyncDelayMs - clock.now()));
+};
+if (syncEngine) syncLoop();
+
 // ── HTTP + WS ──
 const http = createServer((req, res) => {
   if (req.url === "/health") {
@@ -241,8 +298,8 @@ const http = createServer((req, res) => {
         ready,
         upstream: upstream.state,
         memory: { trades: buffer.size, depthColumns: depthHistory.size, bars: engine.bars.length, cvdPoints: engine.cvdPoints.length, signals: engine.signals.length },
-        clients: { aggTrades: aggTrades.size, depth: depth.size, orderflow: orderflow.size, analysis: analysis.size, polymarket: polymarket.size },
-        polymarket: { upstream: pmUpstream(), chainlink: chainlink.state, current: tracker.current?.slug ?? null, history: tracker.history.length, saved: marketStore.count() },
+        clients: { aggTrades: aggTrades.size, depth: depth.size, orderflow: orderflow.size, analysis: analysis.size, polymarket: polymarket.size, engines: engines.size },
+        polymarket: { upstream: pmUpstream(), chainlink: chainlink.state, current: tracker.current?.slug ?? null, history: tracker.history.length, saved: marketStore.count(), syncEngine: syncEngine ? { market: syncEngine.slug, decisions: syncEngine.decisions.length } : null },
         depth: { upstream: depthClient.state },
       }),
     );
@@ -286,6 +343,7 @@ mount(CHANNELS.depth, depth);
 mount(CHANNELS.orderflow, orderflow);
 mount(CHANNELS.analysis, analysis);
 mount(CHANNELS.polymarket, polymarket);
+mount(CHANNELS.engines, engines);
 
 http.on("upgrade", (req, socket, head) => {
   const origin = req.headers.origin;
@@ -322,6 +380,7 @@ http.listen(config.port, async () => {
 const shutdown = () => {
   clearInterval(depthSampler);
   clearInterval(flowSampler);
+  clearTimeout(syncTimer);
   upstream.stop();
   depthClient.stop();
   chainlink.stop();
