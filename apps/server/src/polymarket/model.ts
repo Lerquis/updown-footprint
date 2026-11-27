@@ -10,8 +10,10 @@ import type { CvdPoint, OrderflowSignal, SignalType } from "@updown/protocol";
  */
 
 export interface ModelConfig {
-  /** ventana del TWAP con que resuelve Polymarket (s) */
+  /** ventana del TWAP con que resuelve el mercado (s); 0 = resuelve con el precio puntual (Predict.fun) */
   twapSeconds: number;
+  /** ventana (s) de la media de Binance con que se calcula el basis contra Chainlink; por defecto = twapSeconds */
+  basisSeconds?: number;
   /** cuanto desplaza la media el flujo maximo (en sigmas de 1 s por raiz de segundo de horizonte) */
   flowGain: number;
   /** horizonte (s) tras el cual el flujo deja de informar */
@@ -48,8 +50,13 @@ const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v
 export const logit = (p: number) => Math.log(p / (1 - p));
 export const sigmoid = (x: number) => 1 / (1 + Math.exp(-x));
 
-/** Comision de taker por token (USDC): `feeRate · p · (1 - p)`. Los makers no pagan. */
-export const takerFee = (price: number, feeRate: number) => feeRate * price * (1 - price);
+/** Formula de la comision taker: `pq` = Polymarket (feeRate · p · (1 - p)) · `min` = Predict.fun (feeRate · min(p, 1 - p)) */
+export type FeeKind = "pq" | "min";
+/** Comision de taker por token (USDC). Los makers no pagan. */
+export const takerFee = (price: number, feeRate: number, kind: FeeKind = "pq") =>
+  kind === "min" ? feeRate * Math.min(price, 1 - price) : feeRate * price * (1 - price);
+/** Ventana del basis: `basisSeconds` o, si no se da, la del TWAP */
+export const basisWindow = (cfg: Pick<ModelConfig, "twapSeconds" | "basisSeconds">) => cfg.basisSeconds ?? cfg.twapSeconds;
 
 export interface ProbInput {
   /** precio actual en unidades Chainlink (Binance + basis) */
@@ -78,7 +85,8 @@ export function modelProbUp(i: ProbInput, cfg: ModelConfig = DEFAULT_MODEL): num
   const drift = cfg.flowGain * i.flow * i.sigma * Math.sqrt(Math.min(tau, cfg.flowHorizonS));
   let mean: number;
   let variance: number;
-  if (tau > T) {
+  if (tau > T || T <= 0) {
+    // sin TWAP (T = 0) el cierre es el precio puntual: varianza sigma² · tau
     mean = i.x + drift;
     variance = i.sigma ** 2 * (tau - T + T / 3);
   } else {
@@ -182,7 +190,7 @@ export function flowContext(
 ): FlowContext {
   const last = cvd[cvd.length - 1];
   const fresh = last && now - last.time <= 3000 ? last : undefined;
-  const avg = recentAvg(cvd, now, cfg.twapSeconds);
+  const avg = recentAvg(cvd, now, basisWindow(cfg));
   return {
     binance: fresh?.price ?? null,
     basis: chainlink !== null && avg !== null ? chainlink - avg : null,

@@ -31,7 +31,7 @@ const track = (slug: string | null, decisions: PmDecision[]): EngineTrack => ({ 
  * Canal /ws/engines (decisiones de los motores A, C, D y E). Solo se conecta con `enabled` (drawer abierto):
  * fuera de eso no consume red ni CPU. Los deltas (4 por segundo) se vuelcan a estado una vez por frame.
  */
-export function useEngines(enabled: boolean): EnginesView {
+export function useEngines(enabled: boolean, channel: string = CHANNELS.engines): EnginesView {
   const [view, setView] = useState<Omit<EnginesView, "link">>({ thresholds: null, info: [], tracks: { a: EMPTY, c: EMPTY, d: EMPTY, e: EMPTY } });
   const pending = useRef<EnginesServerMessage[]>([]);
   const frame = useRef(0);
@@ -68,7 +68,7 @@ export function useEngines(enabled: boolean): EnginesView {
     });
   };
 
-  const link = useWsChannel<EnginesServerMessage>(enabled ? CHANNELS.engines : null, (msg) => {
+  const link = useWsChannel<EnginesServerMessage>(enabled ? channel : null, (msg) => {
     pending.current.push(msg);
     if (!frame.current) frame.current = requestAnimationFrame(flush);
   });

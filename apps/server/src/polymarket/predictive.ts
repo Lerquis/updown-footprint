@@ -1,5 +1,5 @@
 import type { PmBlock, PmDecision, PmMarket, PmSide, PmSideDecision, PmSignal } from "@updown/protocol";
-import { blend, DEFAULT_MODEL, modelProbUp, takerFee, type ModelConfig } from "./model.js";
+import { blend, DEFAULT_MODEL, modelProbUp, takerFee, type FeeKind, type ModelConfig } from "./model.js";
 
 /**
  * Motor D: predictivo (taker). Ver docs/features/predictive-engines.md.
@@ -86,6 +86,8 @@ export class FairModel {
 export interface PredictiveConfig {
   fair: FastModelConfig;
   feeRate: number;
+  /** formula de la comision (por defecto la de Polymarket) */
+  feeKind?: FeeKind;
   /** deslizamiento supuesto al evaluar (el papel se ejecuta luego contra el libro real) */
   slippage: number;
   /** EV minimo por token al precio actual para comprar */
@@ -239,7 +241,7 @@ export class PredictiveEngine {
         ev[s].sell = "noQuote";
         continue;
       }
-      const fee = takerFee(bid, c.feeRate);
+      const fee = takerFee(bid, c.feeRate, c.feeKind);
       const edge = bid - fee - c.slippage - prob[s];
       ev[s].sellEdge = round(edge);
       if (edge < c.exitMargin) {
@@ -257,7 +259,7 @@ export class PredictiveEngine {
     // 2) compras
     for (const s of ["up", "down"] as const) {
       const ask = quote[s].ask;
-      if (ask !== null && ask > 0 && ask < 1) ev[s].buyEdge = round(prob[s] - (ask + takerFee(ask, c.feeRate) + c.slippage));
+      if (ask !== null && ask > 0 && ask < 1) ev[s].buyEdge = round(prob[s] - (ask + takerFee(ask, c.feeRate, c.feeKind) + c.slippage));
     }
     const elapsed = (m.end - m.start) / 1000 - tau;
     const global: PmBlock | null = elapsed < c.warmupS ? "warmup" : tau < c.noEntryS ? "closing" : null;
@@ -295,7 +297,7 @@ export class PredictiveEngine {
         block(s, "cooldown");
         continue;
       }
-      const fee = takerFee(ask, c.feeRate);
+      const fee = takerFee(ask, c.feeRate, c.feeKind);
       const cost = ask + fee + c.slippage;
       const edge = prob[s] - cost;
       if (edge < c.minEdge) {
@@ -325,7 +327,7 @@ export class PredictiveEngine {
       side,
       reason,
       price,
-      fee: round(takerFee(price, this.cfg.feeRate), 5),
+      fee: round(takerFee(price, this.cfg.feeRate, this.cfg.feeKind), 5),
       shares: round(shares, 3),
       amount: round(amount, 2),
       pSide: round(pSide),

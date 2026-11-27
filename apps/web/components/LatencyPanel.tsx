@@ -8,6 +8,7 @@ import { exchangeClock } from "@/lib/exchangeClock";
 import type { LatencyView } from "@/lib/useLatency";
 import { LiveBadge } from "./LiveBadge";
 import { MakerProbeCard } from "./MakerProbeCard";
+import { VENUES, type Venue } from "@/lib/venue";
 
 const PROBES: { id: LatencyProbeId; label: string; help: string }[] = [
   { id: "connect", label: "Conexión nueva", help: "GET /time abriendo conexión (DNS + TCP + TLS + ida y vuelta): lo que cuesta una orden si no hay conexión abierta. El servidor la mantiene siempre abierta (HTTP/2), así que no se paga" },
@@ -107,7 +108,7 @@ function ProbeStat({ label, help, p }: { label: string; help: string; p: Latency
 }
 
 /** De dónde sale el tiempo de la orden: red hasta Cloudflare, Cloudflare ↔ Polymarket + validación, y preparación local. */
-function Breakdown({ s }: { s: LatencySample }) {
+function Breakdown({ s, name }: { s: LatencySample; name: string }) {
   const order = s.probes.order.ms;
   const edge = s.probes.edge.ms;
   if (order === null) return null;
@@ -117,22 +118,24 @@ function Breakdown({ s }: { s: LatencySample }) {
       className="text-[10px] text-muted-foreground"
       title="Red: PING hasta el borde de Cloudflare. Polymarket: el resto del POST /order (Cloudflare ↔ servidores de Polymarket + validación). Preparar: cuerpo + HMAC"
     >
-      red {fmtMs(edge)} · polymarket {fmtMs(rest)} · preparar {s.prepMs === null ? "–" : `${s.prepMs.toFixed(2)} ms`}
+      red {fmtMs(edge)} · {name} {fmtMs(rest)} · preparar {s.prepMs === null ? "–" : `${s.prepMs.toFixed(2)} ms`}
     </span>
   );
 }
 
-export function LatencyPanel({ lat }: { lat: LatencyView }) {
+export function LatencyPanel({ lat, venue = "polymarket" }: { lat: LatencyView; venue?: Venue }) {
+  const v = VENUES[venue];
+  const probes = PROBES.map((p) => ({ ...p, ...(v.probes?.[p.id] ?? {}) }));
   const last = lat.history.at(-1) ?? null;
   const ests = lat.history.map((s) => s.estimateMs).filter((v): v is number => v !== null);
 
   return (
     <Card className="gap-0 py-0">
       <CardHeader className="border-b py-3">
-        <CardTitle>Latencia a Polymarket</CardTitle>
+        <CardTitle>{v.latencyTitle}</CardTitle>
         <CardDescription>
-          Cuánto tardaría aproximadamente una compra/venta desde el servidor hasta el CLOB{lat.target && ` (${lat.target})`}. Se envía
-          una orden real firmada con ceros: Polymarket la rechaza siempre, nunca compra. No incluye el tiempo de matching.
+          {v.latencyDesc}
+          {lat.target && ` Destino: ${lat.target}.`}
         </CardDescription>
         <CardAction className="flex items-center gap-2">
           {lat.region && (
@@ -151,10 +154,10 @@ export function LatencyPanel({ lat }: { lat: LatencyView }) {
         >
           <span className="text-[11px] text-muted-foreground">Orden estimada</span>
           <span className={`font-mono text-2xl font-semibold ${tone(last?.estimateMs ?? null)}`}>{fmtMs(last?.estimateMs ?? null)}</span>
-          {last && <Breakdown s={last} />}
+          {last && <Breakdown s={last} name={v.badge.toLowerCase()} />}
         </div>
         <div className="flex flex-wrap gap-x-6 gap-y-2">
-          {PROBES.map((p) => (
+          {probes.map((p) => (
             <ProbeStat key={p.id} label={p.label} help={p.help} p={last?.probes[p.id]} />
           ))}
         </div>
@@ -169,11 +172,10 @@ export function LatencyPanel({ lat }: { lat: LatencyView }) {
       </CardContent>
       {!lat.authReady && lat.link === "open" && (
         <p className="border-t px-4 py-1.5 text-[11px] text-yellow-500">
-          Falta <code>PM_SIGNER_ADDRESS</code> en el servidor: el GET autenticado y POST /order responden 401 antes de validar la orden. La
-          latencia sigue siendo la del gateway; con la dirección, POST /order llega hasta la validación (400) y da la medida exacta.
+          {v.noAuthText}
         </p>
       )}
-      <MakerProbeCard lat={lat} />
+      {venue === "polymarket" && <MakerProbeCard lat={lat} />}
     </Card>
   );
 }

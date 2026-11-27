@@ -62,6 +62,8 @@ export interface TrackerOptions {
   resolveTries: number;
   /** tope de muestras de 1 s por motor y market */
   pointsMax: number;
+  /** prefijo de los logs (por defecto "polymarket") */
+  tag?: string;
 }
 
 /** Muestras, senales y (motor E) ordenes de un motor en un market */
@@ -270,7 +272,7 @@ export class PolymarketTracker extends EventEmitter<TrackerEvents> {
     this.book?.stop();
     this.book = undefined;
     this.bookFor = "";
-    console.log(`[polymarket] market ${this.current.slug}`);
+    console.log(`[${this.opts.tag ?? "polymarket"}] market ${this.current.slug}`);
     this.emit("markets", this.current, this.next);
   }
 

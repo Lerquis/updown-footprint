@@ -16,7 +16,7 @@ export interface MarketRows {
  * Tabla de markets desde la API del servidor (`GET /api/markets`), no desde la memoria del canal WS:
  * trae todos los markets guardados. Se vuelve a pedir cuando cambia `refreshKey` (p. ej. al cerrar un market) y cada minuto.
  */
-export function useMarketRows(refreshKey: string | number): MarketRows {
+export function useMarketRows(refreshKey: string | number, base = "/api/markets"): MarketRows {
   const [state, setState] = useState<MarketRows>({ rows: [], total: 0, loading: true, error: null });
   const apiUrl = useApiUrl();
 
@@ -24,7 +24,7 @@ export function useMarketRows(refreshKey: string | number): MarketRows {
     let cancelled = false;
     const load = async () => {
       try {
-        const res = await fetch(apiUrl("/api/markets?order=desc"));
+        const res = await fetch(apiUrl(`${base}?order=desc`));
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const body = (await res.json()) as PmMarketsResponse;
         if (!cancelled) setState({ rows: body.markets, total: body.total, loading: false, error: null });
@@ -38,19 +38,19 @@ export function useMarketRows(refreshKey: string | number): MarketRows {
       cancelled = true;
       clearInterval(id);
     };
-  }, [refreshKey, apiUrl]);
+  }, [refreshKey, apiUrl, base]);
 
   return state;
 }
 
 /** Pide un market guardado completo (points, barras, CVD, senales, operaciones). */
-export function useFetchRecord() {
+export function useFetchRecord(base = "/api/markets") {
   const apiUrl = useApiUrl();
   return useCallback(
     async (slug: string): Promise<PmRecord | null> => {
-      const res = await fetch(apiUrl(`/api/markets/${encodeURIComponent(slug)}`));
+      const res = await fetch(apiUrl(`${base}/${encodeURIComponent(slug)}`));
       return res.ok ? ((await res.json()) as PmRecord) : null;
     },
-    [apiUrl],
+    [apiUrl, base],
   );
 }

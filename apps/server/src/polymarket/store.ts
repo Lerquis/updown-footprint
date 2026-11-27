@@ -38,9 +38,14 @@ export class MarketStore {
   private tradeBuf: AggTrade[] = [];
   private depthBuf: { col: DepthColumn; step: number }[] = [];
 
+  /**
+   * @param coverage de donde sale si hubo aggTrades de Binance durante un market (por defecto, de esta misma base). Las bases que
+   *   no guardan trades (las de Predict) lo preguntan a la base de su fuente.
+   */
   constructor(
     path: string,
     private readonly symbol = "",
+    private readonly coverage?: (from: number, to: number) => boolean,
   ) {
     if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
     this.db = new DatabaseSync(path);
@@ -187,7 +192,7 @@ export class MarketStore {
   save(rec: PmRecord, meta: SaveMeta = { version: ENGINE_VERSION, params: null }): boolean {
     const m = rec.market;
     if (!rec.complete || m.status !== "closed" || m.result === null) return false;
-    const tradesOk = this.tradeCoverage(m.start - TRADES_LEAD_MS, m.end).ok;
+    const tradesOk = this.coverage ? this.coverage(m.start - TRADES_LEAD_MS, m.end) : this.tradeCoverage(m.start - TRADES_LEAD_MS, m.end).ok;
     this.db
       .prepare(
         "INSERT OR REPLACE INTO markets (slug, start, result, price_to_beat, close_price, net, saved_at, data, engine_version, params, trades_ok) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",

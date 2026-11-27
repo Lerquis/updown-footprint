@@ -41,8 +41,11 @@ export interface PolymarketView {
   upstream: UpstreamState;
 }
 
-/** Canal /ws/polymarket: market BTC Up/Down en curso, precios en vivo e historial de markets terminados. */
-export function usePolymarket(): PolymarketView {
+/**
+ * Canal /ws/polymarket: market BTC Up/Down en curso, precios en vivo e historial de markets terminados.
+ * `channel`: el de Predict (`CHANNELS.predict`) usa los mismos mensajes.
+ */
+export function usePolymarket(channel: string = CHANNELS.polymarket): PolymarketView {
   const [current, setCurrent] = useState<PmMarket | null>(null);
   const [next, setNext] = useState<PmMarket | null>(null);
   const [points, setPoints] = useState<PmPoint[]>([]);
@@ -52,7 +55,7 @@ export function usePolymarket(): PolymarketView {
   const [upstream, setUpstream] = useState<UpstreamState>("connecting");
   const curStart = useRef(0);
 
-  const link = useWsChannel<PolymarketServerMessage>(CHANNELS.polymarket, (msg) => {
+  const link = useWsChannel<PolymarketServerMessage>(channel, (msg) => {
     switch (msg.type) {
       case "snapshot":
         curStart.current = msg.current?.start ?? 0;

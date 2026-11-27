@@ -1,5 +1,5 @@
 import type { PmBlock, PmDecision, PmMarket, PmPnl, PmPoint, PmSide, PmSideDecision, PmSignal } from "@updown/protocol";
-import { blend, DEFAULT_MODEL, modelProbUp, takerFee, type ModelConfig } from "./model.js";
+import { blend, DEFAULT_MODEL, modelProbUp, takerFee, type FeeKind, type ModelConfig } from "./model.js";
 
 /**
  * Reglas de decision del motor (compra / venta / cobertura). Cada segundo evalua el valor esperado (EV) de
@@ -11,6 +11,8 @@ export interface StrategyConfig {
   model: ModelConfig;
   /** comision de taker (0.05 en BTC 5m/15m) */
   feeRate: number;
+  /** formula de la comision (por defecto la de Polymarket) */
+  feeKind?: FeeKind;
   /** deslizamiento supuesto por token al ejecutar (USDC) */
   slippage: number;
   /** EV minimo por token (USDC) para abrir una posicion */
@@ -167,7 +169,7 @@ export class SignalEngine {
         ev[side].sell = "noQuote";
         continue;
       }
-      const sellValue = bid - takerFee(bid, c.feeRate) - c.slippage;
+      const sellValue = bid - takerFee(bid, c.feeRate, c.feeKind) - c.slippage;
       const edge = sellValue - prob[side];
       ev[side].sellEdge = round(edge);
       if (edge < c.exitMargin || p.time - this.lastSignal[side] < c.cooldownS * 1000) {
@@ -183,7 +185,7 @@ export class SignalEngine {
     // (informativo) edge de compra de cada lado con su ask, aunque luego no se pueda comprar
     for (const side of ["up", "down"] as const) {
       const ask = quote[side].ask;
-      if (ask !== null && ask > 0 && ask < 1) ev[side].buyEdge = round(prob[side] - (ask + takerFee(ask, c.feeRate) + c.slippage));
+      if (ask !== null && ask > 0 && ask < 1) ev[side].buyEdge = round(prob[side] - (ask + takerFee(ask, c.feeRate, c.feeKind) + c.slippage));
     }
     const elapsed = (this.market.end - this.market.start) / 1000 - tau;
     const globalBlock: PmBlock | null = elapsed < c.warmupS ? "warmup" : tau < c.noEntryS ? "closing" : this.entries >= c.maxEntries ? "maxEntries" : null;
@@ -209,7 +211,7 @@ export class SignalEngine {
         block(side, "cooldown");
         continue;
       }
-      const cost = ask + takerFee(ask, c.feeRate) + c.slippage;
+      const cost = ask + takerFee(ask, c.feeRate, c.feeKind) + c.slippage;
       const edge = prob[side] - cost;
       if (edge < c.minEdge) {
         block(side, "edge");
@@ -239,12 +241,12 @@ export class SignalEngine {
     this.spent += stake;
     this.entries++;
     this.lastSignal[side] = p.time;
-    return { id: this.id(p), slug: this.market.slug, time: p.time, action: "buy", side, reason, price: ask, fee: round(takerFee(ask, this.cfg.feeRate), 5), shares: round(shares, 3), amount: round(stake, 2), pSide: round(pSide), edge: round(edge), tau };
+    return { id: this.id(p), slug: this.market.slug, time: p.time, action: "buy", side, reason, price: ask, fee: round(takerFee(ask, this.cfg.feeRate, this.cfg.feeKind), 5), shares: round(shares, 3), amount: round(stake, 2), pSide: round(pSide), edge: round(edge), tau };
   }
 
   private sell(p: PmPoint, side: PmSide, bid: number, edge: number, pSide: number, tau: number): PmSignal {
     const pos = this.pos[side];
-    const fee = takerFee(bid, this.cfg.feeRate);
+    const fee = takerFee(bid, this.cfg.feeRate, this.cfg.feeKind);
     const amount = pos.shares * (bid - fee - this.cfg.slippage);
     const shares = pos.shares;
     pos.shares = 0;

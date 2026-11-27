@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
 import type { AggTrade, CvdPoint, OrderflowSignal, PmDecision, PmEngineId, PmMarket, PmPoint, PmSignal } from "@updown/protocol";
-import { estimateSigma, flowScore, recentAvg } from "./model.js";
+import { basisWindow, estimateSigma, flowScore, recentAvg } from "./model.js";
 import { DEFAULT_STRATEGY, SignalEngine, type StrategyConfig } from "./strategy.js";
 
 /**
@@ -200,7 +200,7 @@ export class TimedEngine extends EventEmitter<TimedEngineEvents> {
     const cvd = this.cvd.points;
     const last = cvd[cvd.length - 1];
     const chain = this.feed.chainlink.at(at) ?? null;
-    const avg = recentAvg(cvd, T, cfg.model.twapSeconds);
+    const avg = recentAvg(cvd, T, basisWindow(cfg.model));
     const basis = chain !== null && avg !== null ? chain - avg : null;
     if (basis !== null) this.basisEma = this.basisEma === null ? basis : this.basisEma + (1 - Math.pow(0.5, 1 / 60)) * (basis - this.basisEma);
     const up = this.feed.quote(market.upToken, at);

@@ -15,6 +15,7 @@ import { sliceFlow, type PolymarketView } from "@/lib/usePolymarket";
 import { useEngines } from "@/lib/useEngines";
 import { useTrading } from "@/lib/useTrading";
 import { ENGINE_DESC, ENGINE_IDS, ENGINE_LABEL } from "@/lib/engines";
+import { VENUES, type Venue } from "@/lib/venue";
 import { EnginesDrawer } from "./EnginesDrawer";
 import { LiveTradingCard } from "./LiveTradingCard";
 import { LiveBadge } from "./LiveBadge";
@@ -119,18 +120,22 @@ function TradesList({ engines, start }: { engines: EngineSeries[]; start: number
   );
 }
 
-/** Market BTC Up/Down en vivo + revisión de los markets anteriores junto al flujo de Binance. */
-export function PolymarketPanel({ pm, flow }: { pm: PolymarketView; flow: OrderflowView }) {
+/**
+ * Market BTC Up/Down en vivo + revisión de los markets anteriores junto al flujo de Binance. El mismo panel sirve a Polymarket y a
+ * Predict.fun (`venue`): mismos motores y misma gráfica; Predict no tiene compras reales.
+ */
+export function PolymarketPanel({ pm, flow, venue = "polymarket" }: { pm: PolymarketView; flow: OrderflowView; venue?: Venue }) {
+  const v = VENUES[venue];
   const [selected, setSelected] = useState<string>(LIVE);
   const [fetched, setFetched] = useState<PmRecord | null>(null);
   const [fetching, setFetching] = useState(false);
   const [page, setPage] = useState(0);
-  const fetchRecord = useFetchRecord();
+  const fetchRecord = useFetchRecord(v.api);
   // Decisiones de los motores: el canal solo se abre con el drawer abierto
   const [enginesOpen, setEnginesOpen] = useState(false);
-  const eng = useEngines(enginesOpen);
+  const eng = useEngines(enginesOpen, v.enginesChannel);
   // compras reales del motor A, C o D (canal /ws/trading)
-  const tr = useTrading();
+  const tr = useTrading(v.trading, v.tradingChannel, v.armApi);
   const source = useSource();
   const [now, setNow] = useState(() => exchangeClock.now());
   useEffect(() => {
@@ -140,7 +145,7 @@ export function PolymarketPanel({ pm, flow }: { pm: PolymarketView; flow: Orderf
 
   const history = useMemo(() => pm.history.slice().reverse(), [pm.history]); // reciente primero
   // la tabla sale de la API (todos los markets guardados); se vuelve a pedir cuando cierra uno nuevo
-  const mk = useMarketRows(pm.history[pm.history.length - 1]?.market.slug ?? "");
+  const mk = useMarketRows(pm.history[pm.history.length - 1]?.market.slug ?? "", v.api);
   const isLive = selected === LIVE;
   // market elegido: de la memoria del canal si esta, o pedido a la API (los mas antiguos)
   const picked = isLive ? undefined : (history.find((r) => r.market.slug === selected) ?? (fetched?.market.slug === selected ? fetched : undefined));
@@ -179,7 +184,8 @@ export function PolymarketPanel({ pm, flow }: { pm: PolymarketView; flow: Orderf
       e: view.engines?.e,
     };
     const slug = view.market.slug;
-    const real = tr.trades.filter((t) => t.slug === slug && t.status === "matched");
+    // cada mercado tiene su canal de compras reales (los slugs de Predict y Polymarket coinciden, pero no se mezclan)
+    const real = v.trading ? tr.trades.filter((t) => t.slug === slug && t.status === "matched") : [];
     return ENGINE_IDS.filter((id) => src[id]).map((id) => ({
       id,
       label: ENGINE_LABEL[id],
@@ -189,7 +195,7 @@ export function PolymarketPanel({ pm, flow }: { pm: PolymarketView; flow: Orderf
       orders: src[id]!.orders,
       real: id === "a" || id === "c" || id === "d" ? real.filter((t) => t.engine === id) : undefined,
     }));
-  }, [view, tr.trades]);
+  }, [view, tr.trades, v.trading]);
 
   const totals = useMemo(
     () =>
@@ -226,7 +232,9 @@ export function PolymarketPanel({ pm, flow }: { pm: PolymarketView; flow: Orderf
   return (
     <Card className="gap-0 py-0">
       <CardHeader className="border-b py-3">
-        <CardTitle>Polymarket · BTC Up or Down 5m · motores con Binance {SOURCE_LABEL[source]}</CardTitle>
+        <CardTitle>
+          {v.title} · motores con Binance {SOURCE_LABEL[source]}
+        </CardTitle>
         <CardDescription>
           Market en curso y todos los markets guardados en la base de datos ({mk.total}). Selecciona uno para ver el precio de los
           tokens Up/Down con las señales de Binance marcadas, y el CVD y delta de esos 5 minutos.
@@ -235,7 +243,7 @@ export function PolymarketPanel({ pm, flow }: { pm: PolymarketView; flow: Orderf
           <Button size="sm" variant="outline" onClick={() => setEnginesOpen(true)}>
             Motores
           </Button>
-          <LiveBadge label="Polymarket" link={pm.link} upstream={pm.upstream} />
+          <LiveBadge label={v.badge} link={pm.link} upstream={pm.upstream} />
         </CardAction>
       </CardHeader>
 
@@ -271,7 +279,7 @@ export function PolymarketPanel({ pm, flow }: { pm: PolymarketView; flow: Orderf
                   {fmtClockHM(m.start)} – {fmtClockHM(m.end)} (hora local)
                 </div>
               </div>
-              <Stat label="Chainlink BTC/USD" className="text-violet-400">
+              <Stat label={v.chainlinkLabel} className="text-violet-400">
                 {last?.chainlink != null ? last.chainlink.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : "–"}
               </Stat>
               <Stat label="Price to beat">{usd(m.priceToBeat)}</Stat>
@@ -305,9 +313,9 @@ export function PolymarketPanel({ pm, flow }: { pm: PolymarketView; flow: Orderf
               </div>
             </div>
 
-            {isLive && <LiveTradingCard tr={tr} slug={m.slug} />}
+            {isLive && v.trading && <LiveTradingCard tr={tr} slug={m.slug} venue={venue} />}
             <div className="rounded-md border">
-              <PolymarketChart market={m} points={view.points} bars={view.bars} cvd={view.cvd} signals={view.signals} engines={series} />
+              <PolymarketChart market={m} points={view.points} bars={view.bars} cvd={view.cvd} signals={view.signals} engines={series} chainTitle={v.chainTitle} />
             </div>
             <TradesList engines={series} start={m.start} />
             {!isLive && (

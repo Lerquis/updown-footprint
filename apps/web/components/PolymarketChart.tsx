@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { CvdPoint, FootprintBar, LiveTrade, OrderflowSignal, PmEngineId, PmMarket, PmOrder, PmPoint, PmSignal } from "@updown/protocol";
 import { biasArrow, fmtClockHM, SIGNAL_INFO } from "@/lib/flow";
 import { mid } from "@/lib/usePolymarket";
+import { VENUES } from "@/lib/venue";
 
 /** Probabilidad y operaciones de un motor (cada uno con su propia seccion) */
 export interface EngineSeries {
@@ -27,6 +28,8 @@ interface Props {
   signals: OrderflowSignal[];
   /** motores A, C, D y E: una seccion de probabilidad + operaciones por motor */
   engines: EngineSeries[];
+  /** titulo de la franja de Chainlink (cambia con el mercado: TWAP en Polymarket, precio puntual en Predict) */
+  chainTitle?: string;
 }
 
 const PAD_L = 8;
@@ -35,7 +38,7 @@ const PROB_H = 150;
 const SECTIONS = [
   { key: "price", h: 210, title: "Precio de los tokens Up / Down (¢) con señales" },
   { key: "bin", h: 170, title: "Precio Binance (USDT) con señales" },
-  { key: "chain", h: 150, title: "Precio Chainlink (USD, fuente de Polymarket) con señales" },
+  { key: "chain", h: 150, title: VENUES.polymarket.chainTitle },
   { key: "cvd", h: 80, title: "CVD (Binance, desde el inicio)" },
   { key: "delta", h: 60, title: "Delta por barra footprint" },
 ] as const;
@@ -67,7 +70,7 @@ const fmtCents = (v: number | null) => (v === null ? "–" : `${(v * 100).toFixe
  * más CVD y delta por barra footprint, todo sobre el mismo eje de tiempo (la ventana de 5 min).
  * SVG: son pocos puntos (≤ 300).
  */
-export function PolymarketChart({ market, points, bars, cvd, signals, engines }: Props) {
+export function PolymarketChart({ market, points, bars, cvd, signals, engines, chainTitle }: Props) {
   const ref = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(800);
   const [hover, setHover] = useState<number | null>(null);
@@ -89,13 +92,13 @@ export function PolymarketChart({ market, points, bars, cvd, signals, engines }:
   const layout = useMemo(() => {
     let y = 4;
     const probs = engines.map((e) => ({ key: `prob-${e.id}`, h: PROB_H, title: `${e.label} (${e.desc}) · P(Up) del motor (violeta) vs mercado (blanco) · compras / ventas` }));
-    return [...probs, ...SECTIONS].map((s) => {
+    return [...probs, ...SECTIONS.map((s) => (s.key === "chain" && chainTitle ? { ...s, title: chainTitle } : s))].map((s) => {
       const top = y + 14;
       y += s.h + GAP;
       return { ...s, top, bottom: top + s.h - 14 };
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [engineKeys]);
+  }, [engineKeys, chainTitle]);
   const totalH = layout[layout.length - 1]!.bottom + 22;
 
   const data = useMemo(() => {

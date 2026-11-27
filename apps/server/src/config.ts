@@ -259,4 +259,46 @@ export const config = {
       cancelLatencyMs: num(process.env.PM_PAPER_CANCEL_LATENCY_MS, 100),
     },
   },
+  // ── Predict.fun (rondas BTC Up/Down 5m, docs/features/predict-markets.md) ──
+  predict: {
+    enabled: bool(process.env.PREDICT_ENABLED, true),
+    restUrl: process.env.PREDICT_REST_URL ?? "https://api.predict.fun",
+    wsUrl: process.env.PREDICT_WS_URL ?? "wss://ws.predict.fun/ws",
+    /** mainnet exige API key incluso para leer el REST (el WS es publico). SOLO en .env.local / Railway */
+    apiKey: process.env.PREDICT_API_KEY ?? "",
+    series: process.env.PREDICT_SERIES ?? "btc-updown-5m",
+    /** feed de chainlinkAssetPriceUpdate: 1 = BTC, 2 = ETH, 3 = BNB */
+    priceFeedId: num(process.env.PREDICT_PRICE_FEED_ID, 1),
+    /** comision taker de los motores: feeRate · min(p, 1-p) (feeRateBps 200 de los markets 5m = 0.02) */
+    feeRate: num(process.env.PREDICT_FEE_RATE, 0.02),
+    /** ventana (s) de la media de Binance para el basis contra el Chainlink puntual */
+    basisSeconds: num(process.env.PREDICT_BASIS_SECONDS, 5),
+    /** motores sobre Predict (A, C, D, E en papel, una pila por fuente) */
+    engines: bool(process.env.PREDICT_ENGINES, true),
+    /** bases de los markets de Predict (solo markets; los aggTrades estan en la base de cada fuente), junto a la de spot */
+    dbPath: withGeneration(resolveDbPath(process.env.PREDICT_DB_PATH ?? join(dirname(dbRequested), "predict.db"), process.env.RAILWAY_VOLUME_MOUNT_PATH)),
+    futuresDbPath: withGeneration(resolveDbPath(process.env.PREDICT_FUTURES_DB_PATH ?? join(dirname(dbRequested), "predict-futures.db"), process.env.RAILWAY_VOLUME_MOUNT_PATH)),
+    /** carpetas propias en el bucket de backups (p. ej. updown-predict/v2/ y updown-predict-futures/v2/) */
+    backupPrefix: `${prefixBase.replace(/\/$/, "")}-predict/${DB_GENERATION}/`,
+    futuresBackupPrefix: `${prefixBase.replace(/\/$/, "")}-predict-futures/${DB_GENERATION}/`,
+    /**
+     * Compras reales en Predict (docs/features/predict-markets.md#compras-reales). Clave SOLO en .env.local / Railway.
+     * privateKey: la de la EOA, o la de la wallet de Privy (exportada en predict.fun/account/settings) si se usa una cuenta de Predict;
+     * account: direccion de la cuenta de Predict (predict.fun/portfolio), vacia = se opera con la EOA. Contrasena: TRADING_PASSWORD.
+     */
+    live: {
+      privateKey: process.env.PREDICT_PRIVATE_KEY ?? "",
+      account: process.env.PREDICT_ACCOUNT ?? "",
+      /** real = paper x scale */
+      scale: num(process.env.PREDICT_LIVE_SCALE, 0.2),
+      /** minimo por compra (USDT); nunca baja del minimo de Predict (1 USDT) */
+      minUsd: Math.max(1, num(process.env.PREDICT_LIVE_MIN_USD, 1)),
+      maxUsd: num(process.env.PREDICT_LIVE_MAX_USD, 10),
+      maxMarketUsd: num(process.env.PREDICT_LIVE_MAX_MARKET_USD, 40),
+      /** deslizamiento de A y C sobre el peor nivel del libro (bps); D usa su limite */
+      slippageBps: Math.min(9999, Math.max(0, num(process.env.PREDICT_LIVE_SLIPPAGE_BPS, 500))),
+    },
+    /** latencia a la API de ordenes (solo lectura) */
+    latencyIntervalMs: num(process.env.PREDICT_LATENCY_INTERVAL_MS, 15_000),
+  },
 } as const;

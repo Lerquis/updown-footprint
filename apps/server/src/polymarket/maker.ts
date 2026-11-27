@@ -1,5 +1,5 @@
 import type { PmBlock, PmCancelReason, PmMarket, PmOrder, PmSide, PmSideDecision, PmSignal } from "@updown/protocol";
-import { takerFee } from "./model.js";
+import { takerFee, type FeeKind } from "./model.js";
 import { ceilTick, DEFAULT_FAST_MODEL, FairModel, fastDecision, floorTick, type FastInput, type FastModelConfig, type FastStepResult, type TakerFill } from "./predictive.js";
 
 /**
@@ -20,6 +20,8 @@ import { ceilTick, DEFAULT_FAST_MODEL, FairModel, fastDecision, floorTick, type 
 export interface MakerConfig {
   fair: FastModelConfig;
   feeRate: number;
+  /** formula de la comision (por defecto la de Polymarket) */
+  feeKind?: FeeKind;
   slippage: number;
   /** la compra en reposo esta como maximo a P(lado) - edge */
   edge: number;
@@ -147,6 +149,8 @@ export class MakerEngine {
   private hist: { time: number; pUp: number }[] = [];
   private stopPending: Record<PmSide, string | null> = { up: null, down: null };
   private seq = 0;
+  /** ejecuciones por orden y ms (ids unicos de las senales de ejecucion) */
+  private fillIds = new Map<string, number>();
   private last: { pSide: Record<PmSide, number>; tau: number } | null = null;
 
   constructor(
@@ -203,7 +207,7 @@ export class MakerEngine {
         const entry = pos.cost / pos.shares;
         if (pS < entry - c.stop && bid !== null && bid > 0 && !this.stopPending[s]) {
           // la idea murio: salir ya (taker) con limite que acota la perdida
-          const fee = takerFee(bid, c.feeRate);
+          const fee = takerFee(bid, c.feeRate, c.feeKind);
           wants.ask[s] = none("stop");
           ev[s].sell = "ok";
           ev[s].sellEdge = round(bid - fee - c.slippage - pS);
@@ -257,7 +261,7 @@ export class MakerEngine {
   private stopSignal(i: FastInput, side: PmSide, bid: number, pS: number, tau: number): PmSignal {
     const c = this.cfg;
     const pos = this.pos[side];
-    const fee = takerFee(bid, c.feeRate);
+    const fee = takerFee(bid, c.feeRate, c.feeKind);
     const s: PmSignal = {
       id: `${this.market.slug}:e:${i.time}:${this.seq++}`,
       slug: this.market.slug,
@@ -308,8 +312,12 @@ export class MakerEngine {
       pos.cost += amount;
       this.spent += amount;
     } else this.reduce(side, shares);
+    // una orden puede llenarse en varios niveles en el mismo ms (Predict manda el libro entero de golpe): id unico
+    const key = `${order.id}:${time}`;
+    const n = (this.fillIds.get(key) ?? 0) + 1;
+    this.fillIds.set(key, n);
     return {
-      id: `${order.id}:${time}`,
+      id: n === 1 ? key : `${key}:${n}`,
       slug: this.market.slug,
       time,
       action: order.action,

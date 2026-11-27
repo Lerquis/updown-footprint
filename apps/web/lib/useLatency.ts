@@ -31,7 +31,8 @@ export interface LatencyView {
 }
 
 /** Canal /ws/latency: el servidor mide la latencia al CLOB de Polymarket cada `intervalMs` (baja frecuencia, sin rAF). */
-export function useLatency(): LatencyView {
+/** `channel`: el de Predict (`CHANNELS.predictLatency`) usa los mismos mensajes, sin check maker */
+export function useLatency(channel: string = CHANNELS.latency): LatencyView {
   const apiUrl = useApiUrl();
   const [view, setView] = useState<Omit<LatencyView, "link" | "setMaker">>({
     upstream: "connecting",
@@ -44,7 +45,7 @@ export function useLatency(): LatencyView {
   });
   const [max, setMax] = useState(40);
 
-  const link = useWsChannel<LatencyServerMessage>(CHANNELS.latency, (msg) => {
+  const link = useWsChannel<LatencyServerMessage>(channel, (msg) => {
     if (msg.type === "snapshot") {
       setMax(msg.historyMax);
       setView({

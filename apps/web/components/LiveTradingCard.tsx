@@ -11,12 +11,14 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { fmtClockHMS } from "@/lib/flow";
 import type { TradingView } from "@/lib/useTrading";
+import { VENUES, type Venue } from "@/lib/venue";
 
 const cents = (v: number | null) => (v === null ? "–" : `${(v * 100).toFixed(1)}¢`);
 const ms = (v: number | null) => (v === null ? "–" : `${Math.round(v)} ms`);
 const STATUS: Record<LiveTrade["status"], { label: string; cls: string }> = {
   matched: { label: "ejecutada", cls: "border-buy/40 text-buy" },
   delayed: { label: "con retraso", cls: "border-yellow-500/40 text-yellow-500" },
+  pending: { label: "pendiente", cls: "border-yellow-500/40 text-yellow-500" },
   unmatched: { label: "sin liquidez", cls: "border-yellow-500/40 text-yellow-500" },
   rejected: { label: "rechazada", cls: "border-sell/40 text-sell" },
   error: { label: "error", cls: "border-sell/40 text-sell" },
@@ -27,8 +29,10 @@ const STATUS: Record<LiveTrade["status"], { label: string; cls: string }> = {
  * Interruptor de compras reales (motor A, C o D, solo el market en curso; se apaga solo al terminar) y registro de lo ejecutado:
  * señal vs. ejecución (precio y tiempo). Datos en memoria del servidor, no se guardan.
  */
-export function LiveTradingCard({ tr, slug }: { tr: TradingView; slug: string }) {
+export function LiveTradingCard({ tr, slug, venue = "polymarket" }: { tr: TradingView; slug: string; venue?: Venue }) {
   const source = useSource();
+  const v = VENUES[venue];
+  const cur = v.currency;
   const [pass, setPass] = useState("");
   const [askPass, setAskPass] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -70,9 +74,9 @@ export function LiveTradingCard({ tr, slug }: { tr: TradingView; slug: string })
     <div className={`rounded-md border p-3 ${armed ? "border-sell/60 bg-sell/5" : ""}`}>
       <div className="flex flex-wrap items-center gap-3">
         <div className="flex items-center gap-2">
-          <Switch id="live" checked={armed} disabled={busy || !st?.enabled || (!armed && !isCurrent)} onCheckedChange={(v) => void toggle(v)} />
-          <Label htmlFor="live" className="font-semibold">
-            Compras reales en este market · motores {SOURCE_LABEL[source]}
+          <Switch id={`live-${venue}`} checked={armed} disabled={busy || !st?.enabled || (!armed && !isCurrent)} onCheckedChange={(v) => void toggle(v)} />
+          <Label htmlFor={`live-${venue}`} className="font-semibold">
+            Compras reales en {v.badge} · motores {SOURCE_LABEL[source]}
           </Label>
         </div>
         <ToggleGroup
@@ -111,10 +115,10 @@ export function LiveTradingCard({ tr, slug }: { tr: TradingView; slug: string })
             if (armed) void toggle(true, undefined, { sizing: next });
           }}
         >
-          <ToggleGroupItem value="scaled" title="Paper ÷ 5: entre 1 y 10 USDC">
+          <ToggleGroupItem value="scaled" title={`Paper ÷ 5: entre ${st?.limits.minUsd ?? 1} y ${st?.limits.maxUsd ?? 10} ${cur}`}>
             Proporcional
           </ToggleGroupItem>
-          <ToggleGroupItem value="min" title="Lo mínimo que acepta Polymarket y se puede vender después: máx(1 USDC, 5 tokens)">
+          <ToggleGroupItem value="min" title={`Lo mínimo que acepta ${v.badge}: ${v.minText}`}>
             Mínimo
           </ToggleGroupItem>
         </ToggleGroup>
@@ -157,13 +161,13 @@ export function LiveTradingCard({ tr, slug }: { tr: TradingView; slug: string })
       {st && (
         <p className="mt-2 text-[11px] text-muted-foreground">
           Sigue cada compra/venta del motor {eng.toUpperCase()} con{" "}
-          {siz === "min" ? "el importe mínimo (máx(1 USDC, 5 tokens))" : `${st.limits.scale === 0.2 ? "paper ÷ 5" : `paper × ${st.limits.scale}`} (${st.limits.minUsd}–${st.limits.maxUsd} USDC, mínimo 5 tokens)`}, máximo{" "}
-          {st.limits.maxMarketUsd} USDC por market, orden FAK {st.limits.slippage >= 0.98 ? "sin límite de precio" : `con límite señal ±${Math.round(st.limits.slippage * 100)}¢`}. Se apaga solo al terminar el
-          market. No se guarda.
+          {siz === "min" ? `el importe mínimo (${v.minText})` : `${st.limits.scale === 0.2 ? "paper ÷ 5" : `paper × ${st.limits.scale}`} (${st.limits.minUsd}–${st.limits.maxUsd} ${cur}${venue === "polymarket" ? ", mínimo 5 tokens" : ", nunca menos del mínimo"})`}, máximo{" "}
+          {st.limits.maxMarketUsd} {cur} por market, {v.orderText(st.limits.slippage)}. Se apaga solo al terminar el market. No se guarda.
+          {st.balanceUsd != null && <> Saldo: {st.balanceUsd.toFixed(2)} {cur}.</>}
           {armed && (
             <>
               {" "}
-              Posición: Up {st.position.up.shares.toFixed(2)} · Down {st.position.down.shares.toFixed(2)} tokens · gastado {st.spentUsd.toFixed(2)} USDC.
+              Posición: Up {st.position.up.shares.toFixed(2)} · Down {st.position.down.shares.toFixed(2)} tokens · gastado {st.spentUsd.toFixed(2)} {cur}.
             </>
           )}
         </p>
@@ -188,14 +192,14 @@ export function LiveTradingCard({ tr, slug }: { tr: TradingView; slug: string })
                 <TableHead className="text-right">Límite</TableHead>
                 <TableHead className="text-right">Precio real</TableHead>
                 <TableHead className="text-right">Desliz.</TableHead>
-                <TableHead className="text-right">Tokens / USDC</TableHead>
-                <TableHead className="text-right" title="Desde el segundo de la señal hasta que Polymarket ejecutó la orden (hora de Polymarket, canal de usuario)">
+                <TableHead className="text-right">Tokens / {cur}</TableHead>
+                <TableHead className="text-right" title={`Desde el segundo de la señal hasta que ${v.badge} ejecutó la orden (hora de ${v.badge}, canal de usuario / eventos de la wallet)`}>
                   Señal→ejec.
                 </TableHead>
-                <TableHead className="text-right" title="Desde el segundo de la señal hasta la respuesta de Polymarket">
+                <TableHead className="text-right" title={`Desde el segundo de la señal hasta la respuesta de ${v.badge}`}>
                   Señal→resp.
                 </TableHead>
-                <TableHead className="text-right" title="Ida y vuelta de POST /order (firma aparte)">
+                <TableHead className="text-right" title={`Ida y vuelta de ${venue === "predict" ? "POST /v1/orders" : "POST /order"} (firma aparte)`}>
                   Orden
                 </TableHead>
                 <TableHead>Estado</TableHead>
@@ -217,7 +221,7 @@ export function LiveTradingCard({ tr, slug }: { tr: TradingView; slug: string })
                     <TableCell className="text-right font-mono">{cents(t.avgPrice)}</TableCell>
                     <TableCell className={`text-right font-mono ${t.slippage === null ? "" : t.slippage > 0 ? "text-sell" : "text-buy"}`}>{cents(t.slippage)}</TableCell>
                     <TableCell className="text-right font-mono">
-                      {t.filledShares ? `${t.filledShares.toFixed(2)} / ${t.filledUsd.toFixed(2)}` : t.requestedUsd !== null ? `(${t.requestedUsd.toFixed(2)} USDC)` : t.requestedShares !== null ? `(${t.requestedShares} tok.)` : "–"}
+                      {t.filledShares ? `${t.filledShares.toFixed(2)} / ${t.filledUsd.toFixed(2)}` : t.requestedUsd !== null ? `(${t.requestedUsd.toFixed(2)} ${cur})` : t.requestedShares !== null ? `(${t.requestedShares} tok.)` : "–"}
                     </TableCell>
                     <TableCell className="text-right font-mono">{ms(t.matchedAt === null ? null : t.matchedAt - t.signalTime)}</TableCell>
                     <TableCell className="text-right font-mono">{ms(t.respondedAt === null ? null : t.respondedAt - t.signalTime)}</TableCell>

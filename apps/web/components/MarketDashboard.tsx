@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRef, useState } from "react";
-import { SOURCES, type MarketSource } from "@updown/protocol";
+import { CHANNELS, SOURCES, type MarketSource } from "@updown/protocol";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
@@ -63,6 +63,8 @@ function MarketDashboard({ onSourceChange }: { onSourceChange: (s: MarketSource)
   const flow = useOrderflow();
   const pm = usePolymarket();
   const lat = useLatency();
+  const pf = usePolymarket(CHANNELS.predict);
+  const pfLat = useLatency(CHANNELS.predictLatency);
 
   // Vista (zoom/desplazamiento) compartida por la grafica de precio y la de CVD; vive fuera de React.
   const viewRef = useRef<ChartView | null>(null);
@@ -180,6 +182,8 @@ function MarketDashboard({ onSourceChange }: { onSourceChange: (s: MarketSource)
 
       <LatencyPanel lat={lat} />
       <PolymarketPanel pm={pm} flow={flow} />
+      <LatencyPanel lat={pfLat} venue="predict" />
+      <PolymarketPanel pm={pf} flow={flow} venue="predict" />
       <FootprintPanel bars={flow.bars} signals={flow.signals} />
 
       <Card className="gap-0 py-0">

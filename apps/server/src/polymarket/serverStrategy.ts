@@ -2,16 +2,32 @@ import { existsSync, readFileSync } from "node:fs";
 import { config } from "../config.js";
 import { DEFAULT_MAKER, type MakerConfig } from "./maker.js";
 import { DEFAULT_DRIFT, MICRO_FEATURES, type DriftConfig, type MicroVector } from "./micro.js";
-import { DEFAULT_MODEL } from "./model.js";
+import { DEFAULT_MODEL, type FeeKind } from "./model.js";
 import { DEFAULT_PREDICTIVE, type FastModelConfig, type PredictiveConfig } from "./predictive.js";
 import { DEFAULT_STRATEGY, type StrategyConfig } from "./strategy.js";
 
+/**
+ * Mercado de prediccion al que se aplican los motores. Mismas reglas y umbrales; cambian como se resuelve y la comision:
+ * polymarket = TWAP de 60 s de Chainlink, comision feeRate·p·(1-p) · predict = precio puntual de Chainlink (sin TWAP; el basis
+ * se mide contra una media corta de Binance), comision feeRate·min(p, 1-p). Ver docs/features/predict-markets.md.
+ */
+export type Venue = "polymarket" | "predict";
+
+/** Lo que cambia por mercado: ventana TWAP, ventana del basis y comision */
+function venueModel(venue: Venue): { twapSeconds: number; basisSeconds: number; feeRate: number; feeKind: FeeKind } {
+  return venue === "predict"
+    ? { twapSeconds: 0, basisSeconds: config.predict.basisSeconds, feeRate: config.predict.feeRate, feeKind: "min" }
+    : { twapSeconds: config.pmTwapSeconds, basisSeconds: config.pmTwapSeconds, feeRate: config.pmFeeRate, feeKind: "pq" };
+}
+
 /** Configuracion efectiva del motor de senales segun las variables PM_* (la que usan el servidor y los replays). */
-export function serverStrategy(): StrategyConfig {
+export function serverStrategy(venue: Venue = "polymarket"): StrategyConfig {
+  const v = venueModel(venue);
   return {
     ...DEFAULT_STRATEGY,
-    model: { ...DEFAULT_MODEL, modelWeight: config.pmModelWeight, flowGain: config.pmFlowGain, twapSeconds: config.pmTwapSeconds },
-    feeRate: config.pmFeeRate,
+    model: { ...DEFAULT_MODEL, modelWeight: config.pmModelWeight, flowGain: config.pmFlowGain, twapSeconds: v.twapSeconds, basisSeconds: v.basisSeconds },
+    feeRate: v.feeRate,
+    feeKind: v.feeKind,
     slippage: config.pmSlippage,
     minEdge: config.pmMinEdge,
     exitMargin: config.pmExitMargin,
@@ -47,17 +63,19 @@ export function loadCalibration(path: string): Calibration | null {
 }
 
 /** Configuracion efectiva de los motores D y E (variables PM_FAST_*, PM_D_*, PM_E_*, PM_DRIFT_GAIN y la calibracion). */
-export function serverFast(): { predictive: PredictiveConfig; maker: MakerConfig; drift: DriftConfig; calibration: Calibration | null } {
+export function serverFast(venue: Venue = "polymarket"): { predictive: PredictiveConfig; maker: MakerConfig; drift: DriftConfig; calibration: Calibration | null } {
   const f = config.pmFast;
+  const v = venueModel(venue);
   const fair: FastModelConfig = {
-    model: { ...DEFAULT_MODEL, flowGain: 0, twapSeconds: config.pmTwapSeconds },
+    model: { ...DEFAULT_MODEL, flowGain: 0, twapSeconds: v.twapSeconds, basisSeconds: v.basisSeconds },
     modelWeight: f.modelWeight,
     modelWeightEnd: f.modelWeightEnd,
     endTauS: 30,
   };
   const common = {
     fair,
-    feeRate: config.pmFeeRate,
+    feeRate: v.feeRate,
+    feeKind: v.feeKind,
     slippage: config.pmSlippage,
     bankroll: config.pmBankroll,
     kellyFraction: config.pmKellyFraction,

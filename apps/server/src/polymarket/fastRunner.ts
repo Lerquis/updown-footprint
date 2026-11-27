@@ -22,6 +22,8 @@ export interface FastRunnerOptions {
   retentionMs: number;
   decisionsMax: number;
   twapSeconds: number;
+  /** ventana del basis (s); por defecto twapSeconds */
+  basisSeconds?: number;
   predictive: PredictiveConfig;
   maker: MakerConfig;
   drift: DriftConfig;
@@ -133,7 +135,7 @@ export class FastRunner extends EventEmitter<FastRunnerEvents> {
       this.sec = sec;
       // basis y volatilidad: una vez por segundo, igual que A y C
       const chain = this.feed.chainlink.at(Infinity) ?? null;
-      const avg = recentAvg(this.cvd.points, sec * 1000, this.opts.twapSeconds);
+      const avg = recentAvg(this.cvd.points, sec * 1000, this.opts.basisSeconds ?? this.opts.twapSeconds);
       const basis = chain !== null && avg !== null ? chain - avg : null;
       if (basis !== null) this.basisEma = this.basisEma === null ? basis : this.basisEma + (1 - Math.pow(0.5, 1 / 60)) * (basis - this.basisEma);
       this.sigma = estimateSigma(this.cvd.points);
@@ -229,7 +231,7 @@ export class FastRunner extends EventEmitter<FastRunnerEvents> {
       market,
       d: new PredictiveEngine(market, this.opts.predictive),
       e: new MakerEngine(market, this.opts.maker),
-      taker: new PaperTaker(this.opts.paper.takerLatencyMs, this.opts.predictive.feeRate),
+      taker: new PaperTaker(this.opts.paper.takerLatencyMs, this.opts.predictive.feeRate, this.opts.predictive.feeKind),
       maker: new PaperMaker(market.slug, { postLatencyMs: this.opts.paper.postLatencyMs, cancelLatencyMs: this.opts.paper.cancelLatencyMs }),
       owner: new Map(),
       decided: { d: [], e: [] },

@@ -47,6 +47,11 @@ import { PmFeed, scheduleEngine, TimedEngine } from "./polymarket/timedEngine.js
 import type { LatencyMonitor } from "./polymarket/latency.js";
 import { LiveTrader } from "./polymarket/liveTrader.js";
 import { MakerProbe } from "./polymarket/makerProbe.js";
+import type { PredictMarketApi } from "./predict/api.js";
+import { createPredictVenue, type PredictVenue } from "./predict/venue.js";
+import type { PredictWs } from "./predict/wsClient.js";
+import type { PredictAccount } from "./predict/account.js";
+import type { PredictLatencyMonitor } from "./predict/latency.js";
 
 /** Como se conecta una fuente a Binance y donde guarda lo suyo */
 export interface SourceOptions {
@@ -63,12 +68,17 @@ export interface SourceOptions {
   legacyDbPath: string | null;
   /** backups de esta base (null = desactivados) */
   backup: (BackupConfig & { enabled: boolean; restore: boolean; shutdownTimeoutMs: number }) | null;
+  /** base de los markets de Predict de esta fuente y sus backups */
+  predictDbPath: string;
+  predictBackup: (BackupConfig & { enabled: boolean; restore: boolean; shutdownTimeoutMs: number }) | null;
 }
 
-/** Lo que comparten las dos fuentes: Polymarket es el mismo market para ambas */
+/** Lo que comparten las dos fuentes: Polymarket es el mismo market para ambas; Predict, las mismas rondas y el mismo precio */
 export interface SharedDeps {
   chainlink: ChainlinkClient | ChainlinkTwapClient;
   latencyMonitor: LatencyMonitor;
+  /** null = sin motores de Predict (PREDICT_ENABLED o PREDICT_ENGINES en false) */
+  predict: { api: PredictMarketApi; price: PredictWs; account: PredictAccount; latency: PredictLatencyMonitor } | null;
 }
 
 /** Ruta HTTP/WS sin la fuente: `/ws/futures/x` -> futures + `/ws/x`; el resto es spot. Funcion pura. */
@@ -248,6 +258,32 @@ export async function createSource(opts: SourceOptions, shared: SharedDeps) {
     id === "d" || id === "e" ? { slug: fastRunner.slug, decisions: fastRunner.decisions[id].slice() } : { slug: engines3[id].slug, decisions: engines3[id].decisions.slice() };
   console.log(`[${tag("polymarket")}] db ${opts.dbPath}: ${marketStore.count()} markets completos guardados, ${marketStore.counts().trades} aggTrades, ${tracker.history.length} cargados`);
 
+  // Los mismos motores sobre las rondas de Predict.fun (precio puntual, sin TWAP), con el flujo de esta fuente
+  let ready = false;
+  const predict: PredictVenue | null = shared.predict
+    ? await createPredictVenue({
+        source: opts.id,
+        tag,
+        clock,
+        flow: { bars: () => engine.allBars(), cvd: () => engine.cvdPoints, signals: () => engine.signals },
+        signals: () => engine.signals,
+        binanceBook: () => {
+          if (!book.ready) return null;
+          const { bids, asks } = book.sides();
+          return { bids, asks, mid: (book.bestBid() + book.bestAsk()) / 2 };
+        },
+        api: shared.predict.api,
+        price: shared.predict.price,
+        account: shared.predict.account,
+        latency: shared.predict.latency,
+        dbPath: opts.predictDbPath,
+        backup: opts.predictBackup,
+        coverage: (from, to) => marketStore.tradeCoverage(from, to).ok,
+        symbol: SYMBOL,
+        isReady: () => ready,
+      })
+    : null;
+
   // ── Canales (uno por tipo de dato; cada uno envia snapshot al conectar) ──
   const aggTrades = new Channel<AggTradesServerMessage>(() => ({
     type: "snapshot",
@@ -352,7 +388,6 @@ export async function createSource(opts: SourceOptions, shared: SharedDeps) {
   makerProbe.on("state", (state) => latency.broadcast({ type: "makerState", state }));
 
   // ── Tuberia de trades: relleno historico + vivo, sin duplicados ──
-  let ready = false;
   let lastId = 0;
   const pending: AggTrade[] = [];
 
@@ -364,6 +399,7 @@ export async function createSource(opts: SourceOptions, shared: SharedDeps) {
     engine.ingest(t);
     for (const id of TIMED_IDS) engines3[id].addTrade(t);
     fastRunner.addTrade(t);
+    predict?.addTrade(t);
     if (ready) aggTrades.broadcast({ type: "trade", trade: t });
   };
 
@@ -454,6 +490,7 @@ export async function createSource(opts: SourceOptions, shared: SharedDeps) {
     [CHANNELS.engines, engines as Channel<unknown>],
     [CHANNELS.latency, latency as Channel<unknown>],
     [CHANNELS.trading, trading as Channel<unknown>],
+    ...(predict?.channels ?? []),
   ]);
 
   const cors = (methods: string) => ({
@@ -498,6 +535,8 @@ export async function createSource(opts: SourceOptions, shared: SharedDeps) {
     marketStore,
     clock,
     tracker,
+    /** motores de Predict de esta fuente (null si estan desactivados) */
+    predict,
     channels,
     get ready() {
       return ready;
@@ -507,6 +546,7 @@ export async function createSource(opts: SourceOptions, shared: SharedDeps) {
      * API HTTP de la fuente. `path` va sin el prefijo de la fuente (`/api/markets`). Devuelve false si la ruta no es suya.
      */
     handleHttp(req: IncomingMessage, res: ServerResponse, path: string, url: URL): boolean {
+      if (predict?.handleHttp(req, res, path, url)) return true;
       // Interruptor de compras reales (motor A, C o D de esta fuente, market en curso). Protegido con TRADING_PASSWORD.
       if (path === "/api/trading/arm") {
         passwordPost<TradingArmRequest>(req, res, 4096, "live", (body, reply) => {
@@ -566,6 +606,7 @@ export async function createSource(opts: SourceOptions, shared: SharedDeps) {
           engines: Object.fromEntries(engineInfo.map((e) => [e.id, { market: engineTrack(e.id).slug, decisions: engineTrack(e.id).decisions.length, mode: e.mode, delayMs: e.delayMs }])),
           openOrders: fastRunner.orders().filter((o) => o.status === "open" || o.status === "pending").length,
         },
+        predict: predict ? predict.health() : { enabled: false },
         depth: { upstream: depthClient.state },
         db: dbInfo(),
         live: { enabled: liveTrader.enabled, armedSlug: liveTrader.state().armedSlug },
@@ -620,6 +661,7 @@ export async function createSource(opts: SourceOptions, shared: SharedDeps) {
           ),
         );
       stopEngines.push(scheduleFast(fastRunner, () => clock.now(), (t) => fastRunner.tick(t, marketAt(t)), () => ready));
+      predict?.start();
 
       if (config.backfill) {
         const t0 = Date.now();
@@ -634,6 +676,10 @@ export async function createSource(opts: SourceOptions, shared: SharedDeps) {
 
     /** Backup final (antes de parar nada): copia consistente con todo en marcha (ADR 0013) */
     async finalBackup(): Promise<void> {
+      await Promise.all([this.finalMainBackup(), predict?.finalBackup()]);
+    },
+
+    async finalMainBackup(): Promise<void> {
       if (!dbBackup || !bk?.enabled) return;
       try {
         marketStore.flush();
@@ -667,6 +713,7 @@ export async function createSource(opts: SourceOptions, shared: SharedDeps) {
       await makerProbe.stop().catch(() => undefined);
       step("live", () => liveTrader.stop());
       step("tracker", () => tracker.stop());
+      step("predict", () => predict?.stop());
       step("backup timer", () => dbBackup?.stop());
       step("db flush", () => marketStore.flush());
       step("db close", () => marketStore.close());

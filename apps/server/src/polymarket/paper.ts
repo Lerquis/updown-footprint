@@ -1,5 +1,5 @@
 import type { PmCancelReason, PmOrder, PmSide, PmSignal } from "@updown/protocol";
-import { takerFee } from "./model.js";
+import { takerFee, type FeeKind } from "./model.js";
 import { walkBook, type PmTrade, type TokenBook } from "./pmBook.js";
 
 /**
@@ -29,6 +29,7 @@ export class PaperTaker {
   constructor(
     private readonly latencyMs: number,
     private readonly feeRate: number,
+    private readonly feeKind: FeeKind = "pq",
   ) {}
 
   submit(signal: PmSignal, token: string, now: number): void {
@@ -69,18 +70,18 @@ export class PaperTaker {
       // presupuesto nocional: el importe con comision incluida
       const ask = book.bestAsk();
       if (ask === null) return miss;
-      const budget = s.amount / (1 + this.feeRate * (1 - ask));
+      const budget = s.amount / (1 + takerFee(ask, this.feeRate, this.feeKind) / ask);
       const w = walkBook(book.levels("ask"), "buy", budget, limit);
       if (w.shares <= 1e-9 || w.avg === null) return miss;
-      const fee = takerFee(w.avg, this.feeRate) * w.shares;
+      const fee = takerFee(w.avg, this.feeRate, this.feeKind) * w.shares;
       const usd = w.usd + fee;
-      return { signal: s, shares: w.shares, usd, filled: { ...s, price: round(w.avg, 4), signalPrice: s.price, execTime: now, fee: round(takerFee(w.avg, this.feeRate), 5), shares: round(w.shares, 3), amount: round(usd, 2) } };
+      return { signal: s, shares: w.shares, usd, filled: { ...s, price: round(w.avg, 4), signalPrice: s.price, execTime: now, fee: round(takerFee(w.avg, this.feeRate, this.feeKind), 5), shares: round(w.shares, 3), amount: round(usd, 2) } };
     }
     const w = walkBook(book.levels("bid"), "sell", s.shares, limit);
     if (w.shares <= 1e-9 || w.avg === null) return miss;
-    const fee = takerFee(w.avg, this.feeRate) * w.shares;
+    const fee = takerFee(w.avg, this.feeRate, this.feeKind) * w.shares;
     const usd = w.usd - fee;
-    return { signal: s, shares: w.shares, usd, filled: { ...s, price: round(w.avg, 4), signalPrice: s.price, execTime: now, fee: round(takerFee(w.avg, this.feeRate), 5), shares: round(w.shares, 3), amount: round(usd, 2) } };
+    return { signal: s, shares: w.shares, usd, filled: { ...s, price: round(w.avg, 4), signalPrice: s.price, execTime: now, fee: round(takerFee(w.avg, this.feeRate, this.feeKind), 5), shares: round(w.shares, 3), amount: round(usd, 2) } };
   }
 }
 

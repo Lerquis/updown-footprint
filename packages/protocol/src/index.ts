@@ -30,6 +30,16 @@ export const CHANNELS = {
   engines: "/ws/engines",
   latency: "/ws/latency",
   trading: "/ws/trading",
+  /**
+   * Predict.fun (rondas BTC Up/Down 5m) con los mismos motores: mismos mensajes que `polymarket` (`PolymarketServerMessage`) y
+   * `engines` (`EnginesServerMessage`). Tokens sinteticos `<marketId>:up|down`. API: `/api/predict/markets`. Ver docs/features/predict-markets.md.
+   */
+  predict: "/ws/predict",
+  predictEngines: "/ws/predict-engines",
+  /** compras reales en Predict (`TradingServerMessage`; interruptor `POST /api/predict/trading/arm`) */
+  predictTrading: "/ws/predict-trading",
+  /** latencia a la API de ordenes de Predict (`LatencyServerMessage`, sin check maker) */
+  predictLatency: "/ws/predict-latency",
 } as const;
 
 /**
@@ -982,7 +992,8 @@ export type LatencyServerMessage =
       historyMax: number;
       upstream: UpstreamState;
       /** check maker: ordenes maker reales siguiendo a un motor (antiguo -> reciente) */
-      maker: { state: MakerProbeState; history: MakerProbeSample[] };
+      /** solo Polymarket: en Predict no hay check maker */
+      maker?: { state: MakerProbeState; history: MakerProbeSample[] };
     }
   | { type: "sample"; sample: LatencySample }
   | { type: "makerSample"; sample: MakerProbeSample }
@@ -1005,6 +1016,8 @@ export type LiveTradeStatus =
   | "matched"
   /** aceptada con retraso de matching (no deberia pasar en BTC 5m) */
   | "delayed"
+  /** Predict: aceptada (201), esperando la ejecucion on-chain que llega por los eventos de la wallet */
+  | "pending"
   /** aceptada sin casar: no habia liquidez dentro del limite */
   | "unmatched"
   /** rechazada por Polymarket */
@@ -1079,6 +1092,8 @@ export interface LiveTradingState {
   position: Record<PmSide, { shares: number; costUsd: number }>;
   /** USDC gastados en compras en el market activado */
   spentUsd: number;
+  /** solo Predict: saldo USDT de la cuenta (se lee de la cadena cada minuto); null sin leer */
+  balanceUsd?: number | null;
 }
 
 export type TradingServerMessage =
@@ -1163,3 +1178,4 @@ export interface PmReplayReport {
   /** antiguo -> reciente */
   markets: PmReplayMarket[];
 }
+

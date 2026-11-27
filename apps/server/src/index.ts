@@ -10,6 +10,11 @@ import { LatencyMonitor } from "./polymarket/latency.js";
 import { compareMarkets, compareTotals } from "./polymarket/compare.js";
 import { serverFast } from "./polymarket/serverStrategy.js";
 import { createSource, splitSource, type Source } from "./source.js";
+import { PredictMarketApi } from "./predict/api.js";
+import { PredictWs } from "./predict/wsClient.js";
+import { PredictAccount } from "./predict/account.js";
+import { PredictLatencyMonitor } from "./predict/latency.js";
+import { parseToken } from "./predict/model.js";
 
 /**
  * Composicion (ADR 0016): lo compartido (Chainlink, latencia al CLOB) + una fuente completa por mercado de Binance
@@ -44,7 +49,26 @@ if (!latencyMonitor.authReady) console.log("[latency] sin PM_SIGNER_ADDRESS o cr
 // ── Fuentes ──
 const bk = config.backup;
 const backupFor = (prefix: string) => ({ ...bk, prefix });
-const shared = { chainlink, latencyMonitor };
+// Predict.fun (ADR 0017): rondas por REST y precio Chainlink PUNTUAL por su WS, compartidos por las fuentes; cada fuente monta
+// sus propios motores sobre ellos (predict/venue.ts)
+const pc = config.predict;
+// La cuenta (compras reales) y la latencia a su API tambien son comunes: cada fuente tiene su interruptor pero opera con la misma cuenta
+let predictClock: () => number = () => Date.now();
+let predictMarket: () => { marketId: number; upTokenId: string | null; feeRateBps: number } | null = () => null;
+const predictShared = (() => {
+  if (!pc.enabled || !pc.engines) return null;
+  const api = new PredictMarketApi({ restUrl: pc.restUrl, apiKey: pc.apiKey, series: pc.series });
+  const account = new PredictAccount({ restUrl: pc.restUrl, wsUrl: pc.wsUrl, apiKey: pc.apiKey, privateKey: pc.live.privateKey, predictAccount: pc.live.account });
+  const latency = new PredictLatencyMonitor(
+    { restUrl: pc.restUrl, apiKey: pc.apiKey, intervalMs: pc.latencyIntervalMs, historyMax: config.pmLatencyHistory },
+    account,
+    () => predictMarket(),
+    () => predictClock(),
+  );
+  return { api, price: new PredictWs("predict-price", pc.wsUrl, pc.priceFeedId), account, latency };
+})();
+if (!predictShared) console.log("[predict] desactivado (PREDICT_ENABLED / PREDICT_ENGINES)");
+const shared = { chainlink, latencyMonitor, predict: predictShared };
 const spot = await createSource(
   {
     id: "spot",
@@ -57,6 +81,8 @@ const spot = await createSource(
     dbPath: config.pmDbPath,
     legacyDbPath: config.pmLegacyDbPath,
     backup: backupFor(bk.prefix),
+    predictDbPath: pc.dbPath,
+    predictBackup: backupFor(pc.backupPrefix),
   },
   shared,
 );
@@ -74,6 +100,8 @@ const futures = fc.enabled
         dbPath: fc.dbPath,
         legacyDbPath: null,
         backup: backupFor(fc.backupPrefix),
+        predictDbPath: pc.futuresDbPath,
+        predictBackup: backupFor(pc.futuresBackupPrefix),
       },
       shared,
     )
@@ -156,7 +184,6 @@ for (const [id, src] of sources)
     wss.on("connection", (ws) => channel.add(ws));
     routes.set(sourcePath(id, path), wss);
   }
-
 http.on("upgrade", (req, socket, head) => {
   const origin = req.headers.origin;
   if (config.allowedOrigin && origin !== config.allowedOrigin) {
@@ -176,6 +203,9 @@ http.listen(config.port, async () => {
   console.log(`[server] http/ws on :${config.port} (${[...routes.keys()].join(", ")}, /health)`);
   chainlink.start();
   latencyMonitor.start();
+  predictShared?.price.start();
+  // la cuenta de Predict solo LEE de la cadena al arrancar (firmante, aprobaciones, saldo); el login es al activar
+  void predictShared?.account.init().then(() => predictShared.latency.start());
   // las fuentes arrancan a la vez (el relleno de futures es mas lento por el rate limit y no debe retrasar a spot)
   await Promise.all([...sources.values()].map((s) => s.start()));
   console.log("[server] ready");
@@ -183,6 +213,14 @@ http.listen(config.port, async () => {
 
 // reloj de la latencia: el de spot (estimado con sus trades)
 latencyClock = () => spot.clock.now();
+predictClock = () => spot.clock.now();
+// market de Predict en curso (el de spot) para la latencia: libro y orden de prueba
+predictMarket = () => {
+  const m = spot.predict?.tracker.current;
+  const id = m ? parseToken(m.upToken) : null;
+  const info = id && predictShared ? predictShared.api.tradingInfo(id.marketId) : null;
+  return id ? { marketId: id.marketId, upTokenId: info?.upTokenId ?? null, feeRateBps: info?.feeRateBps ?? 200 } : null;
+};
 
 let shuttingDown = false;
 const shutdown = async (signal: string) => {
@@ -201,6 +239,9 @@ const shutdown = async (signal: string) => {
   };
   step("chainlink", () => chainlink.stop());
   step("latency", () => latencyMonitor.stop());
+  step("predict", () => predictShared?.price.stop());
+  step("predict latency", () => predictShared?.latency.stop());
+  step("predict account", () => predictShared?.account.stop());
   for (const s of sources.values()) await s.stop();
   console.log("[shutdown] listo");
   http.close(() => process.exit(0));

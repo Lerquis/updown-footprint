@@ -19,13 +19,14 @@ export interface TradingView {
 }
 
 /** Canal /ws/trading (compras reales del motor C) + interruptor por HTTP con contrasena (guardada en este navegador). */
-export function useTrading(): TradingView {
+/** `channel`/`armApi`: los de Predict (`CHANNELS.predictTrading`, `/api/predict/trading/arm`) usan los mismos mensajes */
+export function useTrading(enabled = true, channel: string = CHANNELS.trading, armApi = "/api/trading/arm"): TradingView {
   const apiUrl = useApiUrl();
   const [state, setState] = useState<LiveTradingState | null>(null);
   const [trades, setTrades] = useState<LiveTrade[]>([]);
   const [hasPassword, setHasPassword] = useState(() => typeof window !== "undefined" && !!localStorage.getItem(PASS_KEY));
 
-  const link = useWsChannel<TradingServerMessage>(CHANNELS.trading, (msg) => {
+  const link = useWsChannel<TradingServerMessage>(enabled ? channel : null, (msg) => {
     if (msg.type === "snapshot") {
       setState(msg.state);
       setTrades(msg.trades);
@@ -52,7 +53,7 @@ export function useTrading(): TradingView {
     if (!pass) return "falta la contraseña";
     try {
       const body: TradingArmRequest = { slug, armed, engine: opts.engine, sizing: opts.sizing };
-      const r = await fetch(apiUrl("/api/trading/arm"), {
+      const r = await fetch(apiUrl(armApi), {
         method: "POST",
         headers: { "content-type": "application/json", "x-trading-password": pass },
         body: JSON.stringify(body),
@@ -70,7 +71,7 @@ export function useTrading(): TradingView {
     } catch (e) {
       return e instanceof Error ? e.message : String(e);
     }
-  }, [apiUrl]);
+  }, [apiUrl, armApi]);
 
   const forgetPassword = useCallback(() => {
     localStorage.removeItem(PASS_KEY);
