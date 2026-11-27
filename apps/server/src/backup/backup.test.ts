@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { signV4 } from "./s3.js";
-import { snapshot } from "./backup.js";
+import { backupsToPrune, shouldMoveLatest, snapshot } from "./backup.js";
 
 test("signV4 reproduce el ejemplo oficial de AWS (GET Object con Range)", () => {
   const h = signV4({
@@ -42,4 +42,36 @@ test("snapshot copia una base WAL mientras sigue abierta para escribir", async (
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+const H = 3600_000;
+const NOW = Date.UTC(2026, 10, 27, 12, 0, 0);
+const item = (hoursAgo: number, name = `updown/v2/polymarket-${hoursAgo}h.db.gz`) => ({ key: name, lastModified: NOW - hoursAgo * H });
+
+test("backupsToPrune: conserva todo lo de las ultimas keepHours h", () => {
+  const items = [1, 2, 10, 30, 47].map((h) => item(h));
+  assert.deepEqual(backupsToPrune(items, NOW, 48), []);
+});
+
+test("backupsToPrune: de lo anterior deja la primera copia de cada dia UTC", () => {
+  // 25 nov: 3 copias (60, 59, 58 h antes de NOW = 25 nov 00:00-02:00); 24 nov: 2 copias (80, 79 h)
+  const items = [item(80), item(79), item(60), item(59), item(58), item(1)];
+  const pruned = backupsToPrune(items, NOW, 48).sort();
+  assert.deepEqual(pruned, [item(79).key, item(58).key, item(59).key].sort());
+});
+
+test("backupsToPrune: nunca borra la mas reciente ni lo que no es una copia", () => {
+  const items = [item(100), item(99), { key: "updown/v2/latest.json", lastModified: NOW - 100 * H }, { key: "updown/archive/polymarket-local.db.gz", lastModified: NOW - 200 * H }];
+  // archive esta fuera del prefijo en la practica, pero aun asi solo se mira el patron de copia: la mas reciente (99 h) se conserva
+  const pruned = backupsToPrune(items, NOW, 48);
+  assert.ok(!pruned.includes("updown/v2/latest.json"));
+  assert.ok(!pruned.includes(item(99).key));
+});
+
+test("shouldMoveLatest: una base vaciada no pisa el puntero de restauracion", () => {
+  assert.equal(shouldMoveLatest(undefined, 0), true); // primera copia
+  assert.equal(shouldMoveLatest(null, 5), true);
+  assert.equal(shouldMoveLatest(260, 261), true);
+  assert.equal(shouldMoveLatest(260, 260), true);
+  assert.equal(shouldMoveLatest(260, 0), false); // el caso del 27 nov: volumen perdido
 });

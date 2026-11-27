@@ -6,7 +6,7 @@ El servidor es quien recoge los datos 24 h (Binance, Polymarket), así que es é
 Railway (región Amsterdam)                       Cloudflare R2
 ┌─────────────────────────────────┐   backup     ┌──────────────────────────┐
 │ servicio "server" (Docker)      │ ───────────▶ │ updown/v2/polymarket-<fecha> │
-│  node --import tsx src/index.ts │   cada 24 h  │ updown/v2/latest.json        │
+│  node --import tsx src/index.ts │ cada 1 h y   │ updown/v2/latest.json        │
 │  Volume /data/polymarket.db     │ ◀─────────── │                           │
 └─────────────────────────────────┘  restaurar   └──────────────────────────┘
           ▲ wss:// + https:// (/ws/*, /api/markets)    (si el volumen está vacío)
@@ -15,7 +15,8 @@ Railway (región Amsterdam)                       Cloudflare R2
 ```
 
 - **Base**: la misma SQLite de siempre, en un **Volume** de Railway montado en `/data` (`PM_DB_PATH=/data/polymarket.db`, ya fijado en el Dockerfile; el archivo real lleva la generación: `/data/polymarket-v2.db`). Sin cambios de código respecto a local.
-- **Backup**: cada `BACKUP_INTERVAL_H` (24) el servidor hace una copia consistente (`VACUUM INTO` en un hilo aparte, no bloquea), la comprime y la sube al bucket; `latest.json` apunta a la última.
+- **Backup**: cada `BACKUP_INTERVAL_H` (1 h) **y al apagar** (SIGTERM antes de cada deploy) el servidor hace una copia consistente (`VACUUM INTO` en un hilo aparte, no bloquea), la comprime y la sube al bucket. `latest.json` apunta a la última, pero **nunca retrocede**: una copia con menos markets (base vaciada) no lo mueve. Retención: todo lo de 48 h + una por día. Ver [ADR 0013](../decisions/0013-backups-horarios-y-al-apagar.md).
+- **Comprobar**: `GET /health` → `db.onVolume` debe ser `true` en Railway, `db.backup.last` reciente y `polymarket.saved` creciendo. **Antes de cada deploy**, mirar que `saved` > 0 y `db.backup.last` tenga menos de 1 h.
 - **Restauración**: con `PM_DB_RESTORE=true`, si al arrancar **no existe** la base, se descarga la última copia antes de abrirla. Nunca sobrescribe una base existente.
 - Todo lo de backup se desactiva solo si faltan las variables `BACKUP_S3_*`: en local nada cambia.
 
@@ -55,7 +56,7 @@ Para no empezar de cero, se sube la base local al bucket y Railway la descarga a
 | `BACKUP_S3_BUCKET` | `updown-backups` |
 | `BACKUP_S3_ACCESS_KEY_ID`, `BACKUP_S3_SECRET_ACCESS_KEY` | Token de R2 |
 | `PM_DB_RESTORE` | `true` (descarga la última copia si el volumen está vacío) |
-| `RAILWAY_DEPLOYMENT_DRAINING_SECONDS` | `10` (tiempo entre SIGTERM y SIGKILL para cerrar la base limpia) |
+| `RAILWAY_DEPLOYMENT_DRAINING_SECONDS` | **No definirla** (o `180`): `railway.json` ya fija `drainingSeconds: 180` para que dé tiempo al backup final. Con `10` el backup al apagar se corta |
 
 `PORT` lo pone Railway; el resto de variables tienen los mismos valores por defecto que en local ([development.md](development.md)).
 
@@ -79,6 +80,8 @@ Para no empezar de cero, se sube la base local al bucket y Railway la descarga a
 | `BACKUP_S3_ENDPOINT` / `BACKUP_S3_BUCKET` / `BACKUP_S3_ACCESS_KEY_ID` / `BACKUP_S3_SECRET_ACCESS_KEY` | vacío | Bucket S3/R2. Si falta alguna, no hay backups ni restauración |
 | `BACKUP_S3_REGION` | `auto` | `auto` en R2; región real en S3/B2 |
 | `BACKUP_PREFIX` | `updown/` | Carpeta base: los backups van a `<prefijo>v2/` (generación de la base) y el archivo de bases anteriores a `<prefijo>archive/` |
-| `BACKUP_INTERVAL_H` | `24` | Horas entre backups (se recuerda en `/data/.last-backup`) |
+| `BACKUP_INTERVAL_H` | `1` | Horas entre backups (se recuerda en `/data/<base>.last-backup`); además hay backup al apagar |
+| `BACKUP_KEEP_H` | `48` | Horas en que se conservan todas las copias; las anteriores se reducen a una por día |
+| `BACKUP_SHUTDOWN_TIMEOUT_S` | `150` | Máximo del backup final al apagar (menor que `drainingSeconds` 180) |
 | `BACKUP_ENABLED` | `true` | `false`: no programar backups (la restauración y `npm run backup` siguen funcionando) |
 | `PM_DB_RESTORE` | `false` | Al arrancar sin base, descargar la última copia |

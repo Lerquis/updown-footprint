@@ -14,6 +14,8 @@ import {
   type PolymarketServerMessage,
   type UpstreamState,
 } from "@updown/protocol";
+import { statSync } from "node:fs";
+import { dirname } from "node:path";
 import { config } from "./config.js";
 import { AggTradeClient } from "./binance/aggTradeClient.js";
 import { backfillTrades } from "./binance/backfill.js";
@@ -82,6 +84,30 @@ const bk = config.backup;
 const dbBackup = bk.s3.bucket && bk.s3.endpoint && bk.s3.accessKeyId && bk.s3.secretAccessKey ? new DbBackup(bk, config.pmDbPath) : null;
 if (dbBackup && bk.restore) await dbBackup.restoreIfMissing();
 const marketStore = new MarketStore(config.pmDbPath, SYMBOL);
+/** true si la carpeta de la base es otro sistema de archivos que la raiz (un volumen montado); en Railway debe serlo */
+const dbOnVolume = (() => {
+  try {
+    return statSync(dirname(config.pmDbPath)).dev !== statSync("/").dev;
+  } catch {
+    return false;
+  }
+})();
+if (process.env.RAILWAY_ENVIRONMENT && !dbOnVolume)
+  console.error(`[db] !!! ${dirname(config.pmDbPath)} NO es un volumen: la base se borrara en el proximo deploy. Solo quedaran los backups de R2.`);
+const dbInfo = () => {
+  let sizeMb: number | null = null;
+  try {
+    sizeMb = Math.round((statSync(config.pmDbPath).size / 1048576) * 10) / 10;
+  } catch {}
+  return {
+    path: config.pmDbPath,
+    sizeMb,
+    onVolume: dbOnVolume,
+    backup: dbBackup
+      ? { enabled: bk.enabled, intervalH: bk.intervalMs / 3600_000, keepH: bk.keepHours, last: dbBackup.lastBackup() ? new Date(dbBackup.lastBackup()).toISOString() : null }
+      : null,
+  };
+};
 if (dbBackup && bk.enabled) dbBackup.start();
 // La base de la generacion anterior (si existe) se sube una vez al archivo del bucket; nunca se borra ni se modifica
 if (dbBackup)
@@ -330,6 +356,7 @@ const http = createServer((req, res) => {
         clients: { aggTrades: aggTrades.size, depth: depth.size, orderflow: orderflow.size, analysis: analysis.size, polymarket: polymarket.size, engines: engines.size, latency: latency.size },
         polymarket: { upstream: pmUpstream(), chainlink: chainlink.state, current: tracker.current?.slug ?? null, history: tracker.history.length, saved: marketStore.count(), engines: Object.fromEntries(ENGINE_IDS.map((id) => [id, { market: engines3[id].slug, decisions: engines3[id].decisions.length, delayMs: config.pmEngineDelayMs[id] }])) },
         depth: { upstream: depthClient.state },
+        db: dbInfo(),
         latency: { region: config.region, authReady: latencyMonitor.authReady, reconnects: latencyMonitor.reconnects, last: latencyMonitor.history.at(-1) ?? null },
       }),
     );
@@ -409,7 +436,10 @@ http.listen(config.port, async () => {
   console.log("[server] ready");
 });
 
-const shutdown = () => {
+let shuttingDown = false;
+const shutdown = async () => {
+  if (shuttingDown) return;
+  shuttingDown = true;
   clearInterval(depthSampler);
   clearInterval(flowSampler);
   for (const stop of stopEngines) stop();
@@ -419,10 +449,23 @@ const shutdown = () => {
   latencyMonitor.stop();
   tracker.stop();
   dbBackup?.stop();
+  marketStore.flush();
+  // backup final antes de cada deploy/reinicio: si el volumen se pierde, R2 tiene la base hasta este instante (ADR 0013)
+  if (dbBackup && bk.enabled) {
+    console.log("[backup] backup final antes de apagar…");
+    const timeout = new Promise<void>((r) => setTimeout(r, bk.shutdownTimeoutMs).unref());
+    await Promise.race([
+      dbBackup.run().then(
+        (r) => console.log(`[backup] final ok: ${r.key} (${r.markets} markets)`),
+        (e) => console.error(`[backup] final fallo: ${e instanceof Error ? e.message : e}`),
+      ),
+      timeout.then(() => console.error(`[backup] final sin terminar tras ${bk.shutdownTimeoutMs / 1000}s`)),
+    ]);
+  }
   marketStore.close();
   http.close(() => process.exit(0));
   // los WS abiertos mantienen vivo el servidor HTTP: la base ya esta cerrada, salir igualmente
   setTimeout(() => process.exit(0), 3000).unref();
 };
-process.on("SIGINT", shutdown);
-process.on("SIGTERM", shutdown);
+process.on("SIGINT", () => void shutdown());
+process.on("SIGTERM", () => void shutdown());

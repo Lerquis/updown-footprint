@@ -68,6 +68,13 @@ const amzNow = () => new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d
 /** Partes de 64 MB: R2/S3 permiten hasta 10.000 partes (≈ 640 GB) */
 const PART_SIZE = 64 * 1024 * 1024;
 
+export interface S3Object {
+  key: string;
+  size: number;
+  /** ms */
+  lastModified: number;
+}
+
 export class S3Lite {
   private readonly url: URL;
   constructor(private readonly cfg: S3Config) {
@@ -80,7 +87,7 @@ export class S3Lite {
     key: string,
     opts: { query?: Record<string, string>; body?: Buffer | { file: string; start: number; end: number }; payloadHash?: string; headers?: Record<string, string> } = {},
   ): Promise<IncomingMessage> {
-    const path = `/${this.cfg.bucket}/${key}`;
+    const path = key ? `/${this.cfg.bucket}/${key}` : `/${this.cfg.bucket}`;
     const len = opts.body === undefined ? 0 : Buffer.isBuffer(opts.body) ? opts.body.length : opts.body.end - opts.body.start + 1;
     const payloadHash = opts.payloadHash ?? sha256(Buffer.isBuffer(opts.body) ? opts.body : Buffer.alloc(0));
     const headers = signV4({
@@ -115,6 +122,31 @@ export class S3Lite {
     const text = Buffer.concat(chunks).toString("utf8");
     if ((res.statusCode ?? 0) >= 300) throw new Error(`${what}: HTTP ${res.statusCode} ${text.slice(0, 300)}`);
     return text;
+  }
+
+  /** Lista los objetos bajo un prefijo (ListObjectsV2, paginado). */
+  async list(prefix: string): Promise<S3Object[]> {
+    const out: S3Object[] = [];
+    let token: string | undefined;
+    do {
+      const query: Record<string, string> = { "list-type": "2", prefix, ...(token ? { "continuation-token": token } : {}) };
+      const xml = await this.ok(await this.send("GET", "", { query }), `LIST ${prefix}`);
+      for (const c of xml.split("<Contents>").slice(1)) {
+        const key = /<Key>([^<]+)<\/Key>/.exec(c)?.[1];
+        if (!key) continue;
+        out.push({
+          key: key.replace(/&amp;/g, "&"),
+          size: Number(/<Size>(\d+)<\/Size>/.exec(c)?.[1] ?? 0),
+          lastModified: Date.parse(/<LastModified>([^<]+)<\/LastModified>/.exec(c)?.[1] ?? "") || 0,
+        });
+      }
+      token = /<IsTruncated>true<\/IsTruncated>/.test(xml) ? /<NextContinuationToken>([^<]+)<\/NextContinuationToken>/.exec(xml)?.[1] : undefined;
+    } while (token);
+    return out;
+  }
+
+  async delete(key: string): Promise<void> {
+    await this.ok(await this.send("DELETE", key), `DELETE ${key}`);
   }
 
   async putBuffer(key: string, body: Buffer, contentType = "application/octet-stream"): Promise<void> {

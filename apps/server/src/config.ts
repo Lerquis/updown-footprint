@@ -110,7 +110,12 @@ export const config = {
     prefix: `${prefixBase}${DB_GENERATION}/`,
     /** carpeta del archivo final de la base anterior (p. ej. updown/archive/) */
     archivePrefix: `${prefixBase}archive/`,
-    intervalMs: num(process.env.BACKUP_INTERVAL_H, 24) * 3600_000,
+    /** cada hora: si el volumen se pierde, como mucho se pierde 1 h (ADR 0013) */
+    intervalMs: num(process.env.BACKUP_INTERVAL_H, 1) * 3600_000,
+    /** todas las copias de las ultimas 48 h; las anteriores, una por dia */
+    keepHours: num(process.env.BACKUP_KEEP_H, 48),
+    /** tiempo maximo del backup final al apagar (railway.json drainingSeconds debe ser mayor) */
+    shutdownTimeoutMs: num(process.env.BACKUP_SHUTDOWN_TIMEOUT_S, 150) * 1000,
     /** Programar backups periodicos (false: solo restaurar / backups manuales) */
     enabled: bool(process.env.BACKUP_ENABLED, true),
     /** Al arrancar sin base, descargar el ultimo backup */

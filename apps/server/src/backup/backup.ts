@@ -1,17 +1,20 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { DatabaseSync } from "node:sqlite";
 import { rename, rm, stat } from "node:fs/promises";
 import { createReadStream, createWriteStream } from "node:fs";
 import { dirname, join } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { Worker } from "node:worker_threads";
 import { createGunzip, createGzip } from "node:zlib";
-import { S3Lite, type S3Config } from "./s3.js";
+import { S3Lite, type S3Config, type S3Object } from "./s3.js";
 
 /**
  * Backups de la base SQLite a un bucket S3 (Cloudflare R2 recomendado) y restauracion al arrancar.
  * - `snapshot`: copia consistente con `VACUUM INTO` en un hilo aparte (no bloquea el servidor; WAL permite leer mientras se escribe).
  * - Se comprime con gzip y se sube como `<prefix>polymarket-<fecha>.db.gz`; `<prefix>latest.json` apunta al ultimo.
- * Ver docs/guides/deployment.md.
+ * - Cada hora, y otra vez al apagar (SIGTERM antes de cada deploy). Retencion: todo lo de las ultimas `keepHours` h + uno por dia UTC.
+ * - `latest.json` (de donde se restaura) NUNCA retrocede: si una copia tiene menos markets que la anterior (la base se vacio,
+ *   p. ej. el volumen se perdio), se sube igual pero el puntero no se mueve. Ver docs/guides/deployment.md y ADR 0013.
  */
 export interface BackupConfig {
   s3: S3Config;
@@ -21,6 +24,51 @@ export interface BackupConfig {
   archivePrefix: string;
   /** cada cuanto se hace un backup */
   intervalMs: number;
+  /** horas en que se conservan todas las copias; las mas antiguas se reducen a una por dia */
+  keepHours: number;
+}
+
+export interface BackupItem {
+  key: string;
+  /** ms */
+  lastModified: number;
+}
+
+const BACKUP_RE = /polymarket-[^/]*\.db\.gz$/;
+
+/**
+ * Copias a borrar: se conservan todas las de las ultimas `keepHours` h y, de las mas antiguas, la primera de cada dia UTC.
+ * Nunca se borra la mas reciente ni nada que no sea `polymarket-*.db.gz` (latest.json, archivo, etc.).
+ */
+export function backupsToPrune(items: BackupItem[], now: number, keepHours: number): string[] {
+  const backups = items.filter((i) => BACKUP_RE.test(i.key)).sort((a, b) => a.lastModified - b.lastModified);
+  const newest = backups.at(-1)?.key;
+  const keptDays = new Set<string>();
+  const prune: string[] = [];
+  for (const b of backups) {
+    if (b.key === newest || now - b.lastModified < keepHours * 3600_000) continue;
+    const day = new Date(b.lastModified).toISOString().slice(0, 10);
+    if (keptDays.has(day)) prune.push(b.key);
+    else keptDays.add(day);
+  }
+  return prune;
+}
+
+/** El puntero de restauracion solo avanza si la copia nueva no tiene menos markets que la que apunta (una base vaciada no lo pisa). */
+export function shouldMoveLatest(prevMarkets: number | null | undefined, newMarkets: number): boolean {
+  return prevMarkets == null || newMarkets >= prevMarkets;
+}
+
+/** Markets guardados en un archivo SQLite (0 si no hay tabla) */
+function countMarkets(file: string): number {
+  const db = new DatabaseSync(file, { readOnly: true });
+  try {
+    return (db.prepare("SELECT count(*) AS n FROM markets").get() as { n: number }).n;
+  } catch {
+    return 0;
+  } finally {
+    db.close();
+  }
 }
 
 const LATEST = "latest.json";
@@ -50,7 +98,7 @@ const mb = (n: number) => `${(n / 1024 / 1024).toFixed(1)} MB`;
 export class DbBackup {
   private readonly s3: S3Lite;
   private timer: ReturnType<typeof setInterval> | undefined;
-  private running = false;
+  private current: Promise<{ key: string; bytes: number; markets: number }> | null = null;
   /** archivo en el mismo volumen que la base con la fecha del ultimo backup correcto */
   private readonly stampFile: string;
   private readonly tmpDir: string;
@@ -77,10 +125,17 @@ export class DbBackup {
     }
   }
 
-  /** Hace un backup ahora: snapshot → gzip → subida → puntero `latest.json`. */
-  async run(): Promise<{ key: string; bytes: number }> {
-    if (this.running) throw new Error("backup ya en curso");
-    this.running = true;
+  get running(): boolean {
+    return this.current !== null;
+  }
+
+  /** Hace un backup ahora (si ya hay uno en curso, devuelve ese): snapshot → gzip → subida → puntero → retencion. */
+  run(): Promise<{ key: string; bytes: number; markets: number }> {
+    this.current ??= this.doRun().finally(() => (this.current = null));
+    return this.current;
+  }
+
+  private async doRun(): Promise<{ key: string; bytes: number; markets: number }> {
     const t0 = Date.now();
     const raw = join(this.tmpDir, "snapshot.db");
     const gz = `${raw}.gz`;
@@ -88,18 +143,35 @@ export class DbBackup {
       await rm(this.tmpDir, { recursive: true, force: true });
       mkdirSync(this.tmpDir, { recursive: true });
       await snapshot(this.dbPath, raw);
+      const markets = countMarkets(raw);
       await gzip(raw, gz);
       const bytes = (await stat(gz)).size;
       const key = this.key(`polymarket-${new Date().toISOString().replace(/[:.]/g, "-")}.db.gz`);
       await this.s3.putFile(key, gz);
-      await this.s3.putBuffer(this.key(LATEST), Buffer.from(JSON.stringify({ key, bytes, at: Date.now() })), "application/json");
+      const prev = await this.s3
+        .getText(this.key(LATEST))
+        .then((t) => (t ? (JSON.parse(t) as { markets?: number }) : null))
+        .catch(() => null);
+      if (shouldMoveLatest(prev?.markets, markets)) {
+        await this.s3.putBuffer(this.key(LATEST), Buffer.from(JSON.stringify({ key, bytes, markets, at: Date.now() })), "application/json");
+      } else {
+        console.error(`[backup] !!! la copia tiene ${markets} markets y la anterior ${prev?.markets}: la base parece vaciada. Se sube pero latest.json NO se mueve.`);
+      }
       writeFileSync(this.stampFile, String(Date.now()));
-      console.log(`[backup] ${key} (${mb(bytes)} comprimido) en ${((Date.now() - t0) / 1000).toFixed(1)}s`);
-      return { key, bytes };
+      console.log(`[backup] ${key} (${mb(bytes)} comprimido, ${markets} markets) en ${((Date.now() - t0) / 1000).toFixed(1)}s`);
+      await this.prune().catch((e) => console.error(`[backup] retencion: ${e instanceof Error ? e.message : e}`));
+      return { key, bytes, markets };
     } finally {
       await rm(this.tmpDir, { recursive: true, force: true }).catch(() => undefined);
-      this.running = false;
     }
+  }
+
+  /** Borra las copias que sobran segun la retencion (`backupsToPrune`). Solo dentro de `prefix`. */
+  private async prune(): Promise<void> {
+    const items: S3Object[] = await this.s3.list(this.cfg.prefix);
+    const doomed = backupsToPrune(items, Date.now(), this.cfg.keepHours);
+    for (const k of doomed) await this.s3.delete(k);
+    if (doomed.length) console.log(`[backup] retencion: ${doomed.length} copias antiguas borradas`);
   }
 
   /**
