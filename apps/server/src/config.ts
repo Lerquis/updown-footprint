@@ -106,6 +106,8 @@ export const config = {
     slippage: num(process.env.PM_LIVE_SLIPPAGE, 1),
     tick: 0.01,
     minShares: 5,
+    /** canal de usuario: hora exacta (ms) de cada ejecucion */
+    userWsUrl: process.env.PM_USER_WS_URL ?? "wss://ws-subscriptions-clob.polymarket.com/ws/user",
   },
   /** PING de HTTP/2 para mantener caliente la conexion al CLOB */
   pmLatencyKeepAliveMs: num(process.env.PM_LATENCY_KEEPALIVE_MS, 5_000),

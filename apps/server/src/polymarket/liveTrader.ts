@@ -4,15 +4,19 @@ import { OrderBuilder, OrderType, orderToJsonV2, Side, SignatureTypeV2 } from "@
 import { createWalletClient, http } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { polygon } from "viem/chains";
-import type { LiveTrade, LiveTradingState, PmMarket, PmSide, PmSignal } from "@updown/protocol";
+import type { LiveEngine, LiveSizing, LiveTrade, LiveTradingState, PmMarket, PmSide, PmSignal } from "@updown/protocol";
 import { ClobH2 } from "./clobConnection.js";
+import { ReconnectingWs } from "./reconnectingWs.js";
 import { l2Headers, responseDetail, type ClobCreds } from "./latency.js";
 
 /**
- * Compras/ventas REALES siguiendo al motor C (docs/features/live-trading.md). Solo actua si:
+ * Compras/ventas REALES siguiendo al motor elegido, A o C (docs/features/live-trading.md). Solo actua si:
  *  - hay clave privada y contrasena configuradas (si no, `enabled` es false y nunca firma nada),
  *  - el interruptor esta activado para el market en curso (se apaga solo al cambiar de market),
- *  - la senal es del motor C y de ese mismo market.
+ *  - la senal es del motor elegido al activar y de ese mismo market.
+ * Importe: proporcional (paper x scale) o el minimo (max(1 USDC, 5 tokens al precio de la senal)).
+ * La hora exacta de cada ejecucion llega por el canal de usuario de Polymarket (evento `trade`, `timestamp` en ms) y se
+ * reenvia la operacion con `matchedAt`.
  * Importe = paper x `scale` (1/5) entre `minUsd` y `maxUsd`, con tope `maxMarketUsd` por market. Orden FAK con precio
  * limite senal ± `slippage` (por defecto sin limite: 0.99 / 0.01; el importe en USDC sigue acotado). Firma local (OrderBuilder) y envio por la conexion
  * HTTP/2 caliente. La sonda de latencia sigue aparte y sigue firmada con ceros (latency.ts).
@@ -38,6 +42,8 @@ export interface LiveTraderConfig {
   /** minimo de tokens por orden en Polymarket (BTC 5m: 5): una compra menor no se podria vender */
   minShares: number;
   timeoutMs?: number;
+  /** canal de usuario de Polymarket (wss://ws-subscriptions-clob.polymarket.com/ws/user); vacio = no se conecta */
+  userWsUrl?: string;
 }
 
 const round = (v: number, d: number) => Math.round(v * 10 ** d) / 10 ** d;
@@ -102,6 +108,20 @@ export function evaluateFill(
   return { status, filledShares, filledUsd, avgPrice, slippage, orderId: body.orderID || null, detail };
 }
 
+/**
+ * Evento `trade` del canal de usuario -> (id de nuestra orden, instante de ejecucion en ms). Nuestras ordenes son taker
+ * (`taker_order_id`); `timestamp` va en ms (`match_time` solo en segundos). null si no es un trade utilizable.
+ */
+export function tradeEventMatch(ev: unknown): { orderId: string; at: number } | null {
+  const e = ev as { event_type?: string; taker_order_id?: string; timestamp?: string | number; match_time?: string | number } | null;
+  if (!e || e.event_type !== "trade" || !e.taker_order_id) return null;
+  let at = Number(e.timestamp);
+  if (!Number.isFinite(at) || at <= 0) at = Number(e.match_time) * 1000;
+  if (!Number.isFinite(at) || at <= 0) return null;
+  if (at < 1e12) at *= 1000; // por si viniera en segundos
+  return { orderId: e.taker_order_id, at };
+}
+
 const sha = (s: string) => createHash("sha256").update(s).digest();
 const EMPTY_POS = (): Record<PmSide, { shares: number; costUsd: number }> => ({ up: { shares: 0, costUsd: 0 }, down: { shares: 0, costUsd: 0 } });
 
@@ -113,6 +133,11 @@ interface LiveTraderEvents {
 export class LiveTrader extends EventEmitter<LiveTraderEvents> {
   readonly trades: LiveTrade[] = [];
   private armedSlug: string | null = null;
+  private engine: LiveEngine = "c";
+  private sizing: LiveSizing = "scaled";
+  private user: ReconnectingWs | null = null;
+  /** ejecuciones que llegaron por el canal antes que la respuesta HTTP: orderId -> ms */
+  private earlyMatches = new Map<string, number>();
   private currentSlug: string | null = null;
   private position = EMPTY_POS();
   private spentUsd = 0;
@@ -157,11 +182,39 @@ export class LiveTrader extends EventEmitter<LiveTraderEvents> {
     if (!this.h2) return;
     void this.h2.ensure().catch(() => {});
     this.keepAlive = setInterval(() => void this.h2!.ping().catch(() => {}), 5000);
+    if (this.c.userWsUrl) {
+      const { apiKey, secret, passphrase } = this.c.creds;
+      this.user = new ReconnectingWs("pm-user", this.c.userWsUrl, () => [{ auth: { apiKey, secret, passphrase }, type: "user" }], 10_000);
+      this.user.on("message", (m) => {
+        for (const ev of Array.isArray(m) ? m : [m]) {
+          const hit = tradeEventMatch(ev);
+          if (hit) this.onMatch(hit.orderId, hit.at);
+        }
+      });
+      this.user.on("state", () => this.emit("state", this.state()));
+      this.user.start();
+    }
   }
 
   stop(): void {
     if (this.keepAlive) clearInterval(this.keepAlive);
+    this.user?.stop();
     this.h2?.close();
+  }
+
+  /** Hora de ejecucion de una de nuestras ordenes (canal de usuario). Si la respuesta HTTP aun no llego, se guarda para luego. */
+  private onMatch(orderId: string, at: number) {
+    const t = this.trades.find((x) => x.orderId === orderId);
+    if (!t) {
+      this.earlyMatches.set(orderId, at);
+      if (this.earlyMatches.size > 100) this.earlyMatches.delete(this.earlyMatches.keys().next().value!);
+      return;
+    }
+    // una orden puede casar en varios trades: la primera ejecucion es la que cuenta
+    if (t.matchedAt === null || at < t.matchedAt) {
+      t.matchedAt = at;
+      this.emit("trade", { ...t });
+    }
   }
 
   state(): LiveTradingState {
@@ -170,6 +223,9 @@ export class LiveTrader extends EventEmitter<LiveTraderEvents> {
       enabled: this.enabled,
       disabledReason: this.disabledReason,
       armedSlug: this.armedSlug,
+      engine: this.engine,
+      sizing: this.sizing,
+      userStream: this.user?.state ?? "connecting",
       currentSlug: this.currentSlug,
       limits: { scale, minUsd, maxUsd, maxMarketUsd, slippage },
       position: { up: { ...this.position.up }, down: { ...this.position.down } },
@@ -182,10 +238,13 @@ export class LiveTrader extends EventEmitter<LiveTraderEvents> {
     return timingSafeEqual(sha(given), sha(this.c.password));
   }
 
-  /** Activa/desactiva para el market en curso. Devuelve un error legible o null. */
-  setArmed(slug: string, armed: boolean): string | null {
+  /** Activa/desactiva para el market en curso (con el motor y el modo de importe elegidos). Devuelve un error legible o null. */
+  setArmed(slug: string, armed: boolean, opts: { engine?: LiveEngine; sizing?: LiveSizing } = {}): string | null {
+    if (opts.engine === "a" || opts.engine === "c") this.engine = opts.engine;
+    if (opts.sizing === "scaled" || opts.sizing === "min") this.sizing = opts.sizing;
     if (!armed) {
       if (this.armedSlug) this.disarm("apagado por el usuario");
+      else this.emit("state", this.state());
       return null;
     }
     if (!this.enabled) return `compras reales desactivadas: ${this.disabledReason}`;
@@ -195,9 +254,9 @@ export class LiveTrader extends EventEmitter<LiveTraderEvents> {
       this.position = EMPTY_POS();
       this.spentUsd = 0;
       this.trades.length = 0;
-      console.log(`[live] ACTIVADO en ${slug}`);
-      this.emit("state", this.state());
+      console.log(`[live] ACTIVADO en ${slug} (motor ${this.engine.toUpperCase()}, importe ${this.sizing})`);
     }
+    this.emit("state", this.state());
     return null;
   }
 
@@ -216,16 +275,20 @@ export class LiveTrader extends EventEmitter<LiveTraderEvents> {
     else this.emit("state", this.state());
   }
 
-  /** Senales del motor C en un paso. Se ejecutan en serie y en orden. */
-  onSignals(signals: PmSignal[], market: PmMarket | null): void {
-    if (!this.armedSlug || !market || market.slug !== this.armedSlug) return;
+  /** Senales de un motor en un paso: solo cuentan las del motor elegido. Se ejecutan en serie y en orden. */
+  onSignals(engine: LiveEngine, signals: PmSignal[], market: PmMarket | null): void {
+    if (engine !== this.engine || !this.armedSlug || !market || market.slug !== this.armedSlug) return;
     for (const s of signals) {
       if (s.slug !== this.armedSlug) continue;
-      this.queue = this.queue.then(() => this.execute(s, market)).catch((e) => console.error(`[live] ${e instanceof Error ? e.message : e}`));
+      this.queue = this.queue.then(() => this.execute(s, market, engine)).catch((e) => console.error(`[live] ${e instanceof Error ? e.message : e}`));
     }
   }
 
   private record(t: LiveTrade) {
+    if (t.orderId && this.earlyMatches.has(t.orderId)) {
+      t.matchedAt = this.earlyMatches.get(t.orderId)!;
+      this.earlyMatches.delete(t.orderId);
+    }
     this.trades.push(t);
     if (this.trades.length > 50) this.trades.shift();
     const parts = `${t.action} ${t.side} senal ${t.signalPrice} -> ${t.status}${t.avgPrice !== null ? ` a ${t.avgPrice}` : ""}${t.latencyMs !== null ? ` en ${t.latencyMs} ms` : ""}${t.detail ? ` (${t.detail})` : ""}`;
@@ -234,12 +297,13 @@ export class LiveTrader extends EventEmitter<LiveTraderEvents> {
     this.emit("state", this.state());
   }
 
-  private async execute(s: PmSignal, market: PmMarket): Promise<void> {
+  private async execute(s: PmSignal, market: PmMarket, engine: LiveEngine): Promise<void> {
     if (!this.builder || !this.h2 || this.armedSlug !== s.slug) return;
     const token = s.side === "up" ? market.upToken : market.downToken;
     const limitPrice = limitPriceFor(s.action, s.price, this.c.slippage, this.c.tick);
     const base: LiveTrade = {
       signalId: s.id,
+      engine,
       slug: s.slug,
       action: s.action,
       side: s.side,
@@ -253,6 +317,7 @@ export class LiveTrader extends EventEmitter<LiveTraderEvents> {
       sentAt: null,
       respondedAt: null,
       latencyMs: null,
+      matchedAt: null,
       signMs: null,
       status: "skipped",
       filledShares: 0,
@@ -266,7 +331,8 @@ export class LiveTrader extends EventEmitter<LiveTraderEvents> {
 
     let amount: number;
     if (s.action === "buy") {
-      const usd = realBuyUsd(s.amount, s.price, this.c, this.c.maxMarketUsd - this.spentUsd);
+      // minimo: paper 0 -> realBuyUsd lo sube al minimo de Polymarket
+      const usd = realBuyUsd(this.sizing === "min" ? 0 : s.amount, s.price, this.c, this.c.maxMarketUsd - this.spentUsd);
       if (usd === null) return this.record({ ...base, detail: `fuera de limites (gastado ${round(this.spentUsd, 2)} de ${this.c.maxMarketUsd} USDC en el market)` });
       base.requestedUsd = usd;
       amount = usd;

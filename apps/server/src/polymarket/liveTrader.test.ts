@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import type { PmMarket } from "@updown/protocol";
-import { evaluateFill, limitPriceFor, LiveTrader, parseClobAmount, realBuyUsd, type LiveTraderConfig } from "./liveTrader.js";
+import { evaluateFill, limitPriceFor, LiveTrader, parseClobAmount, realBuyUsd, tradeEventMatch, type LiveTraderConfig } from "./liveTrader.js";
 
 const SIZE = { scale: 0.2, minUsd: 1, maxUsd: 10, minShares: 5 };
 
@@ -141,7 +141,7 @@ test("LiveTrader: apagado ignora las senales (no firma ni envia nada)", async ()
   t.onMarket(market("m1"));
   let trades = 0;
   t.on("trade", () => trades++);
-  t.onSignals([{ id: "s1", slug: "m1", time: 1, action: "buy", side: "up", reason: "entry", price: 0.5, fee: 0, shares: 10, amount: 5, pSide: 0.6, edge: 0.05, tau: 200 }], market("m1"));
+  t.onSignals("c", [{ id: "s1", slug: "m1", time: 1, action: "buy", side: "up", reason: "entry", price: 0.5, fee: 0, shares: 10, amount: 5, pSide: 0.6, edge: 0.05, tau: 200 }], market("m1"));
   await new Promise((r) => setTimeout(r, 20));
   assert.equal(trades, 0);
 });
@@ -151,9 +151,39 @@ test("LiveTrader: venta sin tokens reales se registra como omitida, sin enviar",
   t.onMarket(market("m1"));
   t.setArmed("m1", true);
   const got = new Promise<import("@updown/protocol").LiveTrade>((r) => t.once("trade", r));
-  t.onSignals([{ id: "s2", slug: "m1", time: 1, action: "sell", side: "up", reason: "exit", price: 0.7, fee: 0, shares: 10, amount: 7, pSide: 0.4, edge: 0.03, tau: 100 }], market("m1"));
+  t.onSignals("c", [{ id: "s2", slug: "m1", time: 1, action: "sell", side: "up", reason: "exit", price: 0.7, fee: 0, shares: 10, amount: 7, pSide: 0.4, edge: 0.03, tau: 100 }], market("m1"));
   const tr = await got;
   assert.equal(tr.status, "skipped");
   assert.equal(tr.sentAt, null);
   assert.match(tr.detail!, /sin tokens/);
+});
+
+test("realBuyUsd en modo minimo (paper 0): max(1 USDC, 5 tokens al precio de la senal)", () => {
+  assert.equal(realBuyUsd(0, 0.1, SIZE, 40), 1);
+  assert.equal(realBuyUsd(0, 0.5, SIZE, 40), 2.5);
+  assert.equal(realBuyUsd(0, 0.9, SIZE, 40), 4.5);
+});
+
+test("tradeEventMatch: id de la orden taker y hora de ejecucion en ms", () => {
+  assert.deepEqual(tradeEventMatch({ event_type: "trade", taker_order_id: "0xo", timestamp: "1782753357257", match_time: "1782753357" }), { orderId: "0xo", at: 1782753357257 });
+  // sin timestamp en ms: match_time en segundos
+  assert.deepEqual(tradeEventMatch({ event_type: "trade", taker_order_id: "0xo", match_time: "1782753357" }), { orderId: "0xo", at: 1782753357000 });
+  assert.equal(tradeEventMatch({ event_type: "order", id: "0xo", timestamp: "1782753357257" }), null);
+  assert.equal(tradeEventMatch({ event_type: "trade", timestamp: "1782753357257" }), null);
+  assert.equal(tradeEventMatch(null), null);
+});
+
+test("LiveTrader: solo sigue al motor elegido al activar (C por defecto, A si se pide)", async () => {
+  const t = new LiveTrader(cfg(), () => 0);
+  t.onMarket(market("m1"));
+  t.setArmed("m1", true, { engine: "a", sizing: "min" });
+  assert.equal(t.state().engine, "a");
+  assert.equal(t.state().sizing, "min");
+  const seen: string[] = [];
+  t.on("trade", (tr) => seen.push(`${tr.engine}:${tr.signalId}`));
+  const sell = (id: string) => ({ id, slug: "m1", time: 1, action: "sell" as const, side: "up" as const, reason: "exit" as const, price: 0.7, fee: 0, shares: 1, amount: 1, pSide: 0.4, edge: 0.03, tau: 100 });
+  t.onSignals("c", [sell("de-c")], market("m1"));
+  t.onSignals("a", [sell("de-a")], market("m1"));
+  await new Promise((r) => setTimeout(r, 30));
+  assert.deepEqual(seen, ["a:de-a"]); // la senal de C se ignora; la de A se procesa (omitida: no hay tokens que vender)
 });

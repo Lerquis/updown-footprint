@@ -1,12 +1,13 @@
 "use client";
 
 import { useState } from "react";
-import type { LiveTrade } from "@updown/protocol";
+import type { LiveEngine, LiveSizing, LiveTrade } from "@updown/protocol";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { fmtClockHMS } from "@/lib/flow";
 import type { TradingView } from "@/lib/useTrading";
 
@@ -31,17 +32,22 @@ export function LiveTradingCard({ tr, slug }: { tr: TradingView; slug: string })
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const st = tr.state;
+  // motor y modo de importe: los del servidor; se envian al activar (o al cambiarlos con el interruptor activado)
+  const [engine, setEngine] = useState<LiveEngine | null>(null);
+  const [sizing, setSizing] = useState<LiveSizing | null>(null);
+  const eng = engine ?? st?.engine ?? "c";
+  const siz = sizing ?? st?.sizing ?? "scaled";
   const armed = !!st && st.armedSlug === slug;
   const isCurrent = !!st && st.currentSlug === slug;
 
-  const toggle = async (on: boolean, password?: string) => {
+  const toggle = async (on: boolean, password?: string, opts: { engine?: LiveEngine; sizing?: LiveSizing } = {}) => {
     if (on && !tr.hasPassword && !password) {
       setAskPass(true);
       return;
     }
     setBusy(true);
     setErr(null);
-    const e = await tr.setArmed(slug, on, password);
+    const e = await tr.setArmed(slug, on, { password, engine: opts.engine ?? eng, sizing: opts.sizing ?? siz });
     setBusy(false);
     setErr(e);
     if (e === "contraseña incorrecta") setAskPass(true);
@@ -64,9 +70,49 @@ export function LiveTradingCard({ tr, slug }: { tr: TradingView; slug: string })
         <div className="flex items-center gap-2">
           <Switch id="live" checked={armed} disabled={busy || !st?.enabled || (!armed && !isCurrent)} onCheckedChange={(v) => void toggle(v)} />
           <Label htmlFor="live" className="font-semibold">
-            Compras reales (motor C) en este market
+            Compras reales en este market
           </Label>
         </div>
+        <ToggleGroup
+          variant="outline"
+          size="sm"
+          spacing={0}
+          value={[eng]}
+          disabled={busy}
+          onValueChange={(v) => {
+            const next = v[0] as LiveEngine | undefined;
+            if (!next) return;
+            setEngine(next);
+            if (armed) void toggle(true, undefined, { engine: next });
+          }}
+        >
+          <ToggleGroupItem value="a" title="Motor A: decide en el segundo exacto (lo antes posible)">
+            Motor A
+          </ToggleGroupItem>
+          <ToggleGroupItem value="c" title="Motor C: decide 150 ms después del segundo">
+            Motor C
+          </ToggleGroupItem>
+        </ToggleGroup>
+        <ToggleGroup
+          variant="outline"
+          size="sm"
+          spacing={0}
+          value={[siz]}
+          disabled={busy}
+          onValueChange={(v) => {
+            const next = v[0] as LiveSizing | undefined;
+            if (!next) return;
+            setSizing(next);
+            if (armed) void toggle(true, undefined, { sizing: next });
+          }}
+        >
+          <ToggleGroupItem value="scaled" title="Paper ÷ 5: entre 1 y 10 USDC">
+            Proporcional
+          </ToggleGroupItem>
+          <ToggleGroupItem value="min" title="Lo mínimo que acepta Polymarket y se puede vender después: máx(1 USDC, 5 tokens)">
+            Mínimo
+          </ToggleGroupItem>
+        </ToggleGroup>
         {armed && <Badge className="bg-sell text-white">ACTIVO · dinero real</Badge>}
         {st && !st.enabled && <span className="text-[11px] text-muted-foreground">No disponible: {st.disabledReason}</span>}
         {st?.enabled && !isCurrent && !armed && <span className="text-[11px] text-muted-foreground">Solo en el market en curso</span>}
@@ -105,8 +151,9 @@ export function LiveTradingCard({ tr, slug }: { tr: TradingView; slug: string })
 
       {st && (
         <p className="mt-2 text-[11px] text-muted-foreground">
-          Sigue cada compra/venta del motor C con {st.limits.scale === 0.2 ? "paper ÷ 5" : `paper × ${st.limits.scale}`} ({st.limits.minUsd}–{st.limits.maxUsd} USDC, mínimo 5
-          tokens), máximo {st.limits.maxMarketUsd} USDC por market, orden FAK {st.limits.slippage >= 0.98 ? "sin límite de precio" : `con límite señal ±${Math.round(st.limits.slippage * 100)}¢`}. Se apaga solo al terminar el
+          Sigue cada compra/venta del motor {eng.toUpperCase()} con{" "}
+          {siz === "min" ? "el importe mínimo (máx(1 USDC, 5 tokens))" : `${st.limits.scale === 0.2 ? "paper ÷ 5" : `paper × ${st.limits.scale}`} (${st.limits.minUsd}–${st.limits.maxUsd} USDC, mínimo 5 tokens)`}, máximo{" "}
+          {st.limits.maxMarketUsd} USDC por market, orden FAK {st.limits.slippage >= 0.98 ? "sin límite de precio" : `con límite señal ±${Math.round(st.limits.slippage * 100)}¢`}. Se apaga solo al terminar el
           market. No se guarda.
           {armed && (
             <>
@@ -120,20 +167,26 @@ export function LiveTradingCard({ tr, slug }: { tr: TradingView; slug: string })
       {trades.length > 0 && (
         <>
           <p className="mt-2 text-[11px]">
-            Ejecutadas {done.length}/{trades.length} · latencia media <b className="font-mono">{ms(avg((t) => t.latencyMs))}</b> · señal → respuesta{" "}
-            <b className="font-mono">{ms(avg((t) => (t.respondedAt === null ? null : t.respondedAt - t.signalTime)))}</b> · deslizamiento medio{" "}
+            Ejecutadas {done.length}/{trades.length} · señal → ejecución{" "}
+            <b className="font-mono">{ms(avg((t) => (t.matchedAt === null ? null : t.matchedAt - t.signalTime)))}</b> · señal → respuesta{" "}
+            <b className="font-mono">{ms(avg((t) => (t.respondedAt === null ? null : t.respondedAt - t.signalTime)))}</b> · orden{" "}
+            <b className="font-mono">{ms(avg((t) => t.latencyMs))}</b> · deslizamiento medio{" "}
             <b className="font-mono">{cents(avg((t) => t.slippage))}</b>
           </p>
           <Table className="mt-1 text-xs">
             <TableHeader>
               <TableRow>
                 <TableHead>Señal</TableHead>
+                <TableHead>Motor</TableHead>
                 <TableHead>Operación</TableHead>
                 <TableHead className="text-right">Precio señal</TableHead>
                 <TableHead className="text-right">Límite</TableHead>
                 <TableHead className="text-right">Precio real</TableHead>
                 <TableHead className="text-right">Desliz.</TableHead>
                 <TableHead className="text-right">Tokens / USDC</TableHead>
+                <TableHead className="text-right" title="Desde el segundo de la señal hasta que Polymarket ejecutó la orden (hora de Polymarket, canal de usuario)">
+                  Señal→ejec.
+                </TableHead>
                 <TableHead className="text-right" title="Desde el segundo de la señal hasta la respuesta de Polymarket">
                   Señal→resp.
                 </TableHead>
@@ -150,6 +203,7 @@ export function LiveTradingCard({ tr, slug }: { tr: TradingView; slug: string })
                 .map((t) => (
                   <TableRow key={t.signalId} title={t.detail ?? undefined}>
                     <TableCell className="font-mono">{fmtClockHMS(t.signalTime)}</TableCell>
+                    <TableCell className="font-mono">{t.engine.toUpperCase()}</TableCell>
                     <TableCell className={t.side === "up" ? "text-buy" : "text-sell"}>
                       {t.action === "buy" ? "Compra" : "Venta"} {t.side === "up" ? "Up" : "Down"}
                     </TableCell>
@@ -160,6 +214,7 @@ export function LiveTradingCard({ tr, slug }: { tr: TradingView; slug: string })
                     <TableCell className="text-right font-mono">
                       {t.filledShares ? `${t.filledShares.toFixed(2)} / ${t.filledUsd.toFixed(2)}` : t.requestedUsd !== null ? `(${t.requestedUsd.toFixed(2)} USDC)` : t.requestedShares !== null ? `(${t.requestedShares} tok.)` : "–"}
                     </TableCell>
+                    <TableCell className="text-right font-mono">{ms(t.matchedAt === null ? null : t.matchedAt - t.signalTime)}</TableCell>
                     <TableCell className="text-right font-mono">{ms(t.respondedAt === null ? null : t.respondedAt - t.signalTime)}</TableCell>
                     <TableCell className="text-right font-mono">{ms(t.latencyMs)}</TableCell>
                     <TableCell>

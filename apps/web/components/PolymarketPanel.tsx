@@ -172,7 +172,7 @@ export function PolymarketPanel({ pm, flow }: { pm: PolymarketView; flow: Orderf
       desc: ENGINE_DESC[id],
       points: src[id]!.points,
       trades: src[id]!.trades,
-      real: id === "c" ? real : undefined,
+      real: id === "a" || id === "c" ? real.filter((t) => t.engine === id) : undefined,
     }));
   }, [view, tr.trades]);
 

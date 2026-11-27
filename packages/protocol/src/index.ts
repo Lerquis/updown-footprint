@@ -764,10 +764,14 @@ export type LatencyServerMessage =
 // ───────────────────────── Canal trading (compras reales del motor C) ─────────────────────────
 
 /**
- * Compras/ventas REALES en Polymarket que sigue al motor C, solo con el interruptor activado y solo en el market en curso
- * (se desactiva solo al terminar el market). Importe = paper / 5, entre 1 y 10 USDC; orden FAK con precio limite senal ± 2c.
+ * Compras/ventas REALES en Polymarket que siguen al motor elegido (A o C), solo con el interruptor activado y solo en el market
+ * en curso (se desactiva solo al terminar el market). Importe proporcional (paper / 5, 1..10 USDC) o el minimo posible; orden FAK.
  * Esta informacion de momento NO se guarda en la base: vive en memoria del servidor.
  */
+/** motor cuyas senales se ejecutan: A (T + 0, lo antes posible) o C (T + 150 ms) */
+export type LiveEngine = "a" | "c";
+/** scaled: paper / 5 (1..10 USDC) · min: lo minimo que acepta Polymarket y se puede vender despues (max(1 USDC, 5 tokens)) */
+export type LiveSizing = "scaled" | "min";
 export type LiveTradeStatus =
   /** casada (total o parcialmente) */
   | "matched"
@@ -783,8 +787,10 @@ export type LiveTradeStatus =
   | "skipped";
 
 export interface LiveTrade {
-  /** id de la senal del motor C que la disparo */
+  /** id de la senal que la disparo */
   signalId: string;
+  /** motor que la disparo */
+  engine: LiveEngine;
   slug: string;
   action: "buy" | "sell";
   side: PmSide;
@@ -806,6 +812,11 @@ export interface LiveTrade {
   respondedAt: number | null;
   /** ida y vuelta de POST /order (ms) */
   latencyMs: number | null;
+  /**
+   * instante de la ejecucion segun Polymarket (ms, su reloj; `timestamp` del evento `trade` del canal de usuario). Llega despues
+   * de la respuesta: el servidor reenvia la operacion con este campo. null hasta entonces o si no se ejecuto.
+   */
+  matchedAt: number | null;
   /** firmar la orden en local (ms) */
   signMs: number | null;
   status: LiveTradeStatus;
@@ -828,6 +839,11 @@ export interface LiveTradingState {
   disabledReason: string | null;
   /** market en el que el interruptor esta activado; null = apagado */
   armedSlug: string | null;
+  /** motor que se sigue y modo de importe (los elige el usuario al activar) */
+  engine: LiveEngine;
+  sizing: LiveSizing;
+  /** canal de usuario de Polymarket (hora exacta de cada ejecucion) */
+  userStream: UpstreamState;
   /** market en curso (el unico que se puede activar) */
   currentSlug: string | null;
   limits: { scale: number; minUsd: number; maxUsd: number; maxMarketUsd: number; slippage: number };
@@ -840,11 +856,14 @@ export interface LiveTradingState {
 export type TradingServerMessage =
   | { type: "snapshot"; state: LiveTradingState; trades: LiveTrade[] }
   | { type: "state"; state: LiveTradingState }
-  /** nueva operacion real (o intento) */
+  /** operacion real (o intento), nueva o actualizada (p. ej. al llegar `matchedAt`): el cliente hace upsert por `signalId` */
   | { type: "trade"; trade: LiveTrade };
 
 /** POST /api/trading/arm (cabecera `x-trading-password`): activar o desactivar las compras reales en el market en curso. */
 export interface TradingArmRequest {
   slug: string;
   armed: boolean;
+  /** por defecto se mantiene el anterior (al arrancar: C y proporcional) */
+  engine?: LiveEngine;
+  sizing?: LiveSizing;
 }

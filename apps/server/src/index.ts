@@ -256,7 +256,7 @@ const latency = new Channel<LatencyServerMessage>(() => ({
 }));
 latencyMonitor.on("sample", (sample) => latency.broadcast({ type: "sample", sample }));
 
-// Compras reales siguiendo al motor C: solo con el interruptor de la web activado y solo en el market en curso
+// Compras reales siguiendo al motor A o C: solo con el interruptor de la web activado y solo en el market en curso
 const liveTrader = new LiveTrader(
   {
     clobUrl: config.pmClobUrl,
@@ -305,7 +305,7 @@ tracker.on("quote", (q) => feed.onQuote(q.token, q.bid, q.ask, q.time ?? clock.n
 for (const id of ENGINE_IDS) {
   engines3[id].on("step", (st) => {
     tracker.addStep(id, st.slug, st.point, st.signals);
-    if (id === "c" && st.signals.length) liveTrader.onSignals(st.signals, tracker.current);
+    if ((id === "a" || id === "c") && st.signals.length) liveTrader.onSignals(id, st.signals, tracker.current);
     engines.broadcast({ type: "decision", engine: id, slug: st.slug, decision: st.decision });
   });
 }
@@ -423,7 +423,7 @@ const http = createServer((req, res) => {
       } catch {
         return reply(400, { error: "cuerpo invalido" });
       }
-      const err = liveTrader.setArmed(String(body.slug ?? ""), body.armed === true);
+      const err = liveTrader.setArmed(String(body.slug ?? ""), body.armed === true, { engine: body.engine, sizing: body.sizing });
       reply(err ? 409 : 200, err ? { error: err, state: liveTrader.state() } : { state: liveTrader.state() });
     });
     return;

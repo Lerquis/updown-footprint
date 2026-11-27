@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useState } from "react";
-import { CHANNELS, type LiveTrade, type LiveTradingState, type TradingArmRequest, type TradingServerMessage } from "@updown/protocol";
+import { CHANNELS, type LiveEngine, type LiveSizing, type LiveTrade, type LiveTradingState, type TradingArmRequest, type TradingServerMessage } from "@updown/protocol";
 import { HTTP_BASE, useWsChannel, type LinkState } from "./useWsChannel";
 
 const PASS_KEY = "updown.tradingPassword";
@@ -12,7 +12,7 @@ export interface TradingView {
   /** operaciones reales del market activado, antiguo -> reciente */
   trades: LiveTrade[];
   /** activar/desactivar en el market en curso; devuelve un error legible o null */
-  setArmed: (slug: string, armed: boolean, password?: string) => Promise<string | null>;
+  setArmed: (slug: string, armed: boolean, opts?: { password?: string; engine?: LiveEngine; sizing?: LiveSizing }) => Promise<string | null>;
   /** hay contrasena guardada en este navegador */
   hasPassword: boolean;
   forgetPassword: () => void;
@@ -35,15 +35,22 @@ export function useTrading(): TradingView {
         return msg.state;
       });
     } else {
-      setTrades((t) => [...t, msg.trade].slice(-50));
+      // upsert por senal: la misma operacion vuelve a llegar cuando Polymarket confirma la hora de ejecucion
+      setTrades((t) => {
+        const i = t.findIndex((x) => x.signalId === msg.trade.signalId);
+        if (i < 0) return [...t, msg.trade].slice(-50);
+        const next = t.slice();
+        next[i] = msg.trade;
+        return next;
+      });
     }
   });
 
-  const setArmed = useCallback(async (slug: string, armed: boolean, password?: string) => {
-    const pass = password ?? localStorage.getItem(PASS_KEY) ?? "";
+  const setArmed = useCallback(async (slug: string, armed: boolean, opts: { password?: string; engine?: LiveEngine; sizing?: LiveSizing } = {}) => {
+    const pass = opts.password ?? localStorage.getItem(PASS_KEY) ?? "";
     if (!pass) return "falta la contraseña";
     try {
-      const body: TradingArmRequest = { slug, armed };
+      const body: TradingArmRequest = { slug, armed, engine: opts.engine, sizing: opts.sizing };
       const r = await fetch(`${HTTP_BASE}/api/trading/arm`, {
         method: "POST",
         headers: { "content-type": "application/json", "x-trading-password": pass },

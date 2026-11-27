@@ -1,4 +1,4 @@
-# Compras reales del motor C
+# Compras reales (motor A o C)
 
 **Estado**: Implementada (requiere `PM_WALLET_PRIVATE_KEY` y `TRADING_PASSWORD` en el servidor).
 
@@ -7,9 +7,9 @@
 ## Reglas
 | Regla | Valor |
 |---|---|
-| Quién dispara | Solo las señales del **motor C** (`TimedEngine` c, T + 150 ms) |
+| Quién dispara | Las señales del motor elegido al activar: **A** (T + 0, lo antes posible) o **C** (T + 150 ms, por defecto) |
 | Cuándo | Solo con el interruptor activado, solo en el **market en curso**. Se apaga solo al cambiar de market y al reiniciar el servidor |
-| Importe de compra | Paper ÷ 5 (`PM_LIVE_SCALE` 0.2): paper 5..50 → **1..10 USDC** (`PM_LIVE_MIN_USD`/`MAX_USD`) |
+| Importe de compra | **Proporcional:** paper ÷ 5 (`PM_LIVE_SCALE` 0.2), es decir, paper 5..50 → **1..10 USDC** (`PM_LIVE_MIN_USD`/`MAX_USD`). **Mínimo:** lo menos que acepta Polymarket y se puede vender después, `max(1 USDC, 5 tokens × precio de la señal)`. Se elige al activar |
 | Mínimo de Polymarket | Se sube a `max(1 USDC, 5 tokens × precio de la señal)` para poder venderlo después. Si no cabe en 10 USDC o en el tope del market, se omite |
 | Tope por market | 40 USDC en compras (`PM_LIVE_MAX_MARKET_USD`) |
 | Venta | Vende **todos** los tokens reales de ese lado (de las ejecuciones). Sin tokens reales: omitida |
@@ -23,7 +23,12 @@
 4. **Envío** por su propia conexión HTTP/2 caliente (`ClobH2`) con cabeceras L2 ([ADR 0012](../decisions/0012-conexion-http2-caliente-al-clob.md)).
 5. La respuesta (`makingAmount`/`takingAmount`) se lee con `evaluateFill`: tokens, USDC, precio medio y deslizamiento. Se actualiza la posición real y se emite `LiveTrade`.
 
-Tiempos en cada `LiveTrade` (reloj de Binance): `signalTime` (segundo en que decidió el motor), `sentAt`, `respondedAt`, `latencyMs` (ida y vuelta de `POST /order`) y `signMs` (firma).
+Tiempos en cada `LiveTrade`:
+- En reloj de Binance: `signalTime` (segundo en que decidió el motor), `sentAt` y `respondedAt`.
+- Duraciones: `latencyMs` (ida y vuelta de `POST /order`) y `signMs` (firma).
+- En reloj de Polymarket: **`matchedAt`**, el instante de la ejecución. Llega por el **canal de usuario** (`wss://ws-subscriptions-clob.polymarket.com/ws/user`, `PM_USER_WS_URL`, autenticado con las credenciales CLOB, PING cada 10 s): evento `trade`, `taker_order_id` = nuestra `orderId`, `timestamp` en ms (`tradeEventMatch`). Suele llegar después de la respuesta HTTP; el servidor reenvía la operación con `matchedAt` y el cliente hace *upsert* por `signalId`. Si llega antes, se guarda hasta que llega la respuesta.
+
+`matchedAt − signalTime` (señal → ejecución) es la medida que importa. `respondedAt − matchedAt` indica cuánto tarda Polymarket en responder después de ejecutar.
 
 ## Latencia real (27 nov, Railway Amsterdam)
 Primeras 4 compras con límite ±2¢: todas `rejected` con "no orders found to match with FAK order". Se comprobó con los trades del market (Data API v2) que el precio subió 4–9¢ en menos de 1 s: otros compradores se llevaron a los vendedores baratos antes de que llegara nuestra orden. Por eso se quitó el límite.
