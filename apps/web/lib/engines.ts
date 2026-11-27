@@ -15,6 +15,9 @@ export const BLOCK_LABEL: Record<PmBlock, string> = {
   cooldown: "espera",
   edge: "EV bajo",
   stake: "importe mínimo/tope",
+  pending: "esperando ejecución",
+  quoting: "orden en el libro",
+  drift: "flujo en contra",
 };
 
 export const BLOCK_HELP: Record<PmBlock, string> = {
@@ -31,6 +34,9 @@ export const BLOCK_HELP: Record<PmBlock, string> = {
   cooldown: "Espera tras la última señal de ese lado.",
   edge: "El valor esperado no supera el umbral.",
   stake: "El importe según Kelly es menor que el mínimo, o se agotó el tope por market.",
+  pending: "Motor D/E: la orden ya se envió y espera su ejecución (en papel, tras la latencia simulada).",
+  quoting: "Motor E: tiene una orden límite en reposo en el libro de ese lado.",
+  drift: "Motor E: el flujo de Binance no empuja a favor de ese lado (o la probabilidad acaba de caer): no deja orden de compra.",
 };
 
 export const cents = (v: number | null) => (v === null ? "–" : `${(v * 100).toFixed(0)}¢`);
@@ -39,7 +45,7 @@ export const pct = (v: number | null) => (v === null ? "–" : `${(v * 100).toFi
 
 export const signalLabel = (s: Pick<PmSignal, "action" | "side" | "price">) => `${s.action === "buy" ? "C" : "V"} ${s.side === "up" ? "Up" : "Dn"} ${cents(s.price)}`;
 
-/** Clave de lo que hizo el motor en un segundo (para comparar A y B) */
+/** Clave de lo que hizo el motor en un segundo (para comparar A y C) */
 export const actionKey = (d: PmDecision | undefined) => (d ? d.signals.map((s) => `${s.action}${s.side}`).join(",") : "");
 /** Clave del estado de decision (acciones + impedimentos de cada lado) */
 export const stateKey = (d: PmDecision | undefined) => (d ? `${actionKey(d)}|${d.up.buy}${d.up.sell}${d.down.buy}${d.down.sell}` : "");
@@ -61,11 +67,14 @@ export function paperNet(trades: PmSignal[], result: "up" | "down" | null): numb
   return Math.round((net + open[result]) * 100) / 100;
 }
 
-export const ENGINE_IDS: PmEngineId[] = ["a", "b", "c"];
+export const ENGINE_IDS: PmEngineId[] = ["a", "c", "d", "e"];
+/** Motores con las mismas reglas (los que se comparan segundo a segundo) */
+export const SAME_RULES: PmEngineId[] = ["a", "c"];
 /** Nombre corto y descripcion de cada motor (retrasos por defecto; el servidor envia los reales por el canal engines) */
-export const ENGINE_LABEL: Record<PmEngineId, string> = { a: "Motor A", b: "Motor B", c: "Motor C" };
+export const ENGINE_LABEL: Record<PmEngineId, string> = { a: "Motor A", c: "Motor C", d: "Motor D", e: "Motor E" };
 export const ENGINE_DESC: Record<PmEngineId, string> = {
   a: "segundo exacto, lo último recibido",
-  b: "segundo + 300 ms, datos a fecha",
   c: "segundo + 150 ms, datos a fecha",
+  d: "predictivo: cada 100 ms, deriva de Binance, límite; papel con latencia",
+  e: "libro: órdenes maker en reposo; papel con la cola real",
 };

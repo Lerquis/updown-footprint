@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { actionKey, BLOCK_HELP, BLOCK_LABEL, cents, edgeCents, ENGINE_DESC, ENGINE_IDS, ENGINE_LABEL, pct, signalLabel, stateKey } from "@/lib/engines";
+import { actionKey, BLOCK_HELP, BLOCK_LABEL, cents, edgeCents, ENGINE_DESC, ENGINE_IDS, ENGINE_LABEL, pct, SAME_RULES, signalLabel, stateKey } from "@/lib/engines";
 import { fmtClockHM } from "@/lib/flow";
 import type { EnginesView } from "@/lib/useEngines";
 
@@ -32,7 +32,7 @@ function Verdict({ label, edge, block, threshold }: { label: string; edge: numbe
 }
 
 /** Estado en vivo de un motor: ultima decision y sus razones. */
-function EngineCard({ id, hint, d, trades, th }: { id: PmEngineId; hint: string; d: PmDecision | undefined; trades: number; th: PmEngineThresholds }) {
+function EngineCard({ id, hint, d, trades, th, maker }: { id: PmEngineId; hint: string; d: PmDecision | undefined; trades: number; th: PmEngineThresholds; maker: boolean }) {
   return (
     <div className="flex flex-col gap-2 rounded-md border p-3 text-xs">
       <div className="flex flex-col">
@@ -59,13 +59,14 @@ function EngineCard({ id, hint, d, trades, th }: { id: PmEngineId; hint: string;
             </span>
           </div>
           <div className="flex flex-col gap-0.5 border-t pt-2">
-            <Verdict label="Comprar Up" edge={d.up.buyEdge} block={d.up.buy} threshold={th.minEdge} />
-            <Verdict label="Comprar Down" edge={d.down.buyEdge} block={d.down.buy} threshold={th.minEdge} />
-            {d.up.sell !== "flat" && <Verdict label="Vender Up" edge={d.up.sellEdge} block={d.up.sell} threshold={th.exitMargin} />}
-            {d.down.sell !== "flat" && <Verdict label="Vender Down" edge={d.down.sellEdge} block={d.down.sell} threshold={th.exitMargin} />}
+            <Verdict label={maker ? "Bid Up" : "Comprar Up"} edge={d.up.buyEdge} block={d.up.buy} threshold={th.minEdge} />
+            <Verdict label={maker ? "Bid Down" : "Comprar Down"} edge={d.down.buyEdge} block={d.down.buy} threshold={th.minEdge} />
+            {d.up.sell !== "flat" && <Verdict label={maker ? "Ask Up" : "Vender Up"} edge={d.up.sellEdge} block={d.up.sell} threshold={th.exitMargin} />}
+            {d.down.sell !== "flat" && <Verdict label={maker ? "Ask Down" : "Vender Down"} edge={d.down.sellEdge} block={d.down.sell} threshold={th.exitMargin} />}
           </div>
           <div className="text-[11px] text-muted-foreground">
-            {trades} operaciones en este market{d.signals.length > 0 && <> · ahora: <b className="text-foreground">{d.signals.map(signalLabel).join(", ")}</b></>}
+            {trades} {maker ? "salidas de emergencia" : "órdenes"} decididas en este market
+            {d.signals.length > 0 && <> · ahora: <b className="text-foreground">{d.signals.map(signalLabel).join(", ")}</b></>}
           </div>
         </>
       )}
@@ -91,7 +92,7 @@ const Timeline = memo(function Timeline({ decisions, start }: { decisions: Recor
   const [onlyDiff, setOnlyDiff] = useState(false);
   const [all, setAll] = useState(false);
   const rows = useMemo(() => {
-    // los tres motores deciden sobre el mismo segundo T de Binance (cada uno con su retraso)
+    // todos los motores dejan un registro por segundo T de Binance (A y C con su retraso; D y E, el ultimo paso de ese segundo)
     const map = new Map<number, Row>();
     for (const id of ENGINE_IDS)
       for (const d of decisions[id]) {
@@ -102,14 +103,15 @@ const Timeline = memo(function Timeline({ decisions, start }: { decisions: Recor
       }
     const out = [...map.values()].sort((x, y) => y.sec - x.sec);
     for (const r of out) {
-      const present = ENGINE_IDS.map((id) => r.d[id]).filter((d): d is PmDecision => !!d);
-      if (present.length < 2) continue; // solo se compara cuando al menos dos decidieron ese segundo
+      // solo se comparan los motores con las mismas reglas (A y C); D y E deciden con otras
+      const present = SAME_RULES.map((id) => r.d[id]).filter((d): d is PmDecision => !!d);
+      if (present.length < 2) continue;
       r.diffAction = new Set(present.map(actionKey)).size > 1;
       r.diffState = !r.diffAction && new Set(present.map(stateKey)).size > 1;
     }
     return out;
   }, [decisions]);
-  const full = rows.filter((r) => ENGINE_IDS.every((id) => r.d[id]));
+  const full = rows.filter((r) => SAME_RULES.every((id) => r.d[id]));
   const sameActions = full.filter((r) => !r.diffAction).length;
   const sameState = full.filter((r) => !r.diffAction && !r.diffState).length;
   const shown = (onlyDiff ? rows.filter((r) => r.diffAction || r.diffState) : rows).slice(0, all ? undefined : ROWS);
@@ -118,10 +120,10 @@ const Timeline = memo(function Timeline({ decisions, start }: { decisions: Recor
     <div className="flex flex-col gap-2">
       <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-muted-foreground">
         <span>
-          Segundos con los 3 motores: {full.length} · misma acción {sameActions} · misma evaluación completa {sameState}
+          A y C (mismas reglas) en {full.length} segundos · misma acción {sameActions} · misma evaluación completa {sameState}
         </span>
         <label className="flex items-center gap-1.5">
-          <Switch size="sm" checked={onlyDiff} onCheckedChange={setOnlyDiff} /> Solo diferencias
+          <Switch size="sm" checked={onlyDiff} onCheckedChange={setOnlyDiff} /> Solo diferencias A/C
         </label>
       </div>
       <div className="rounded-md border">
@@ -161,8 +163,8 @@ const Timeline = memo(function Timeline({ decisions, start }: { decisions: Recor
 });
 
 /**
- * Drawer de comparacion de motores A, B y C: la ultima decision de cada uno con sus razones, la linea de tiempo
- * segundo a segundo del market en curso, y el resultado de papel de los tres en los markets guardados recientes.
+ * Drawer de comparacion de motores A, C, D y E: la ultima decision de cada uno con sus razones, la linea de tiempo
+ * segundo a segundo del market en curso, y el resultado de papel de todos en los markets guardados recientes.
  */
 export function EnginesDrawer({
   open,
@@ -194,38 +196,36 @@ export function EnginesDrawer({
     <Sheet open={open} onOpenChange={onOpenChange}>
       <SheetContent className="w-full overflow-y-auto sm:max-w-5xl">
         <SheetHeader>
-          <SheetTitle>Motores A, B y C</SheetTitle>
+          <SheetTitle>Motores A, C, D y E</SheetTitle>
           <SheetDescription>
-            Mismas reglas, una decisión por segundo de Binance, en distinto instante y con distintos datos. <b>A</b>: justo al empezar el segundo, con lo último
-            recibido. <b>B</b> y <b>C</b>: esperan {delay("b")?.delayMs ?? 300} ms y {delay("c")?.delayMs ?? 150} ms y usan solo datos con marca de tiempo de ese
-            segundo, para que servidores distintos decidan lo mismo. Los tres se guardan en la base.
+            <b>A</b> y <b>C</b>: mismas reglas, una decisión por segundo de Binance (A justo al empezar el segundo con lo último recibido; C espera{" "}
+            {delay("c")?.delayMs ?? 150} ms y usa solo datos con marca de tiempo de ese segundo). <b>D</b> (predictivo): decide cada {delay("d")?.delayMs ?? 100} ms
+            con la deriva que anticipa el flujo de Binance, exige más EV y pone un precio límite; su papel se ejecuta con la latencia real de Polymarket.{" "}
+            <b>E</b> (libro): deja órdenes límite en reposo sin comisión y las recoloca o cancela en cuanto la idea muere. Todos se guardan en la base.
           </SheetDescription>
         </SheetHeader>
         <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
           <Badge variant="outline">{eng.link === "open" ? "conectado" : eng.link === "connecting" ? "conectando…" : "desconectado"}</Badge>
           {th && (
             <span>
-              Umbrales: comprar si EV ≥ {edgeCents(th.minEdge)} · vender si supera a mantener en {edgeCents(th.exitMargin)} · spread máx. {cents(th.maxSpread)} · sin
-              entradas los primeros {th.warmupS}s ni los últimos {th.noEntryS}s
+              Umbrales de A y C: comprar si EV ≥ {edgeCents(th.minEdge)} · vender si supera a mantener en {edgeCents(th.exitMargin)} · spread máx. {cents(th.maxSpread)} ·
+              sin entradas los primeros {th.warmupS}s ni los últimos {th.noEntryS}s. D y E muestran los suyos en cada tarjeta.
             </span>
           )}
         </div>
 
         {th && (
-          <div className="grid gap-2 lg:grid-cols-3">
+          <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
             {ENGINE_IDS.map((id) => {
               const info = delay(id);
               const ds = decisions[id];
-              return (
-                <EngineCard
-                  key={id}
-                  id={id}
-                  hint={info ? `${info.mode === "live" ? "lo último recibido" : "datos a fecha"} · segundo + ${info.delayMs} ms` : ENGINE_DESC[id]}
-                  d={ds[ds.length - 1]}
-                  trades={ds.reduce((n, d) => n + d.signals.length, 0)}
-                  th={th}
-                />
-              );
+              const own = info?.thresholds ?? th;
+              const hint = !info
+                ? ENGINE_DESC[id]
+                : info.mode === "fast"
+                  ? `${ENGINE_DESC[id]} · ${info.kind === "maker" ? `bid a ≥ ${edgeCents(own.minEdge)} bajo su valor, ask a ${edgeCents(own.exitMargin)} sobre él` : `EV ≥ ${edgeCents(own.minEdge)}, salida ${edgeCents(own.exitMargin)}`}`
+                  : `${info.mode === "live" ? "lo último recibido" : "datos a fecha"} · segundo + ${info.delayMs} ms`;
+              return <EngineCard key={id} id={id} hint={hint} d={ds[ds.length - 1]} trades={ds.reduce((n, d) => n + d.signals.length, 0)} th={own} maker={info?.kind === "maker"} />;
             })}
           </div>
         )}

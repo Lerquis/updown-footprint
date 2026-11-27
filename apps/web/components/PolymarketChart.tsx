@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { CvdPoint, FootprintBar, LiveTrade, OrderflowSignal, PmEngineId, PmMarket, PmPoint, PmSignal } from "@updown/protocol";
+import type { CvdPoint, FootprintBar, LiveTrade, OrderflowSignal, PmEngineId, PmMarket, PmOrder, PmPoint, PmSignal } from "@updown/protocol";
 import { biasArrow, fmtClockHM, SIGNAL_INFO } from "@/lib/flow";
 import { mid } from "@/lib/usePolymarket";
 
@@ -12,7 +12,9 @@ export interface EngineSeries {
   desc: string;
   points: PmPoint[];
   trades: PmSignal[];
-  /** operaciones REALES ejecutadas siguiendo a este motor (solo motor C, market en curso) */
+  /** motor E: ordenes en reposo (cada una es un tramo horizontal en su precio, de que entra al libro a que se ejecuta o cancela) */
+  orders?: PmOrder[];
+  /** operaciones REALES ejecutadas siguiendo a este motor (A, C o D, market en curso) */
   real?: LiveTrade[];
 }
 
@@ -23,7 +25,7 @@ interface Props {
   bars: FootprintBar[];
   cvd: CvdPoint[];
   signals: OrderflowSignal[];
-  /** motores A, B y C: una seccion de probabilidad + operaciones por motor */
+  /** motores A, C, D y E: una seccion de probabilidad + operaciones por motor */
   engines: EngineSeries[];
 }
 
@@ -114,7 +116,7 @@ export function PolymarketChart({ market, points, bars, cvd, signals, engines }:
           return { time: p.time, v: u !== null && d !== null ? (u + 1 - d) / 2 : u !== null ? u : d !== null ? 1 - d : null };
         })
         .filter((p): p is { time: number; v: number } => p.v !== null);
-      return { id: e.id, eng, mkt, trades: e.trades, real: e.real ?? [] };
+      return { id: e.id, eng, mkt, trades: e.trades, real: e.real ?? [], orders: e.orders ?? [], lastT: e.points[e.points.length - 1]?.time ?? end };
     });
     const [qLo, qHi] = extent(probs.flatMap((pr) => [...pr.eng, ...pr.mkt].map((p) => p.v)), 0.1, 0.2);
     const prLo = Math.max(0, qLo);
@@ -135,7 +137,7 @@ export function PolymarketChart({ market, points, bars, cvd, signals, engines }:
     const [cLo, cHi] = extent([0, ...cv.map((p) => p[1])], 0.1, 1);
     const dMax = Math.max(0.001, ...bars.map((b) => Math.abs(b.delta)));
     return { probs, prLo, prHi, up, down, pLo, pHi, bin, bLo, bHi, chain, kLo, kHi, cv, cLo, cHi, dMax };
-  }, [points, cvd, bars, signals, priceToBeat, engines]);
+  }, [points, cvd, bars, signals, priceToBeat, engines, end]);
 
   type L = (typeof layout)[number];
   const probSecs = layout.slice(0, engines.length);
@@ -253,17 +255,44 @@ export function PolymarketChart({ market, points, bars, cvd, signals, engines }:
                   </g>
                 );
               })}
+              {/* motor E: ordenes en reposo (tramo en su precio Up-equivalente; continuo = ejecutada, discontinuo = cancelada) */}
+              {pr.orders.map((o) => {
+                const v = o.side === "up" ? o.price : 1 - o.price;
+                if (v < data.prLo || v > data.prHi) return null;
+                const t0 = Math.max(start, o.liveAt);
+                const t1 = Math.min(end, o.status === "filled" ? (o.filledAt ?? o.liveAt) : (o.cancelAt ?? pr.lastT));
+                if (o.status === "pending" || t1 < t0) return null;
+                const y = yProb(v);
+                return (
+                  <line
+                    key={o.id}
+                    x1={xOf(t0)}
+                    x2={Math.max(xOf(t0) + 1.5, xOf(t1))}
+                    y1={y}
+                    y2={y}
+                    className={o.side === "up" ? "stroke-buy" : "stroke-sell"}
+                    strokeWidth={o.status === "filled" ? 2.5 : 1.5}
+                    strokeDasharray={o.status === "cancelled" ? "3 2" : undefined}
+                    opacity={o.action === "buy" ? 0.85 : 0.55}
+                  >
+                    <title>{`Orden ${o.action === "buy" ? "de compra" : "de venta"} ${o.side === "up" ? "Up" : "Down"} a ${(o.price * 100).toFixed(0)}¢ · ${o.shares} tokens · cola por delante al entrar ${o.queueAhead.toFixed(0)} · ${o.status === "filled" ? "ejecutada" : o.status === "cancelled" ? `cancelada (${o.cancelReason ?? "–"})` : "en el libro"}${o.filledShares > 0 && o.status !== "filled" ? ` · ejecutados ${o.filledShares}` : ""}`}</title>
+                  </line>
+                );
+              })}
               {pr.trades.map((t) => {
                 // Up-equivalente: comprar/vender Down a q equivale a 1-q en la escala de Up
-                const v = t.side === "up" ? t.price : 1 - t.price;
-                const x = xOf(t.time);
-                const y = yProb(Math.min(data.prHi, Math.max(data.prLo, v)));
+                const upEq = (p: number) => Math.min(data.prHi, Math.max(data.prLo, t.side === "up" ? p : 1 - p));
+                // D y E: el marcador va donde se ejecuto (precio y momento), unido a la decision si fue taker
+                const x = xOf(t.execTime ?? t.time);
+                const y = yProb(upEq(t.price));
                 const buy = t.action === "buy";
                 const up = t.side === "up";
+                const showSignal = t.signalPrice !== undefined && !t.maker && t.execTime !== undefined;
                 return (
                   <g key={t.id} className={up ? "fill-buy stroke-buy" : "fill-sell stroke-sell"}>
-                    <title>{`${buy ? "COMPRAR" : "VENDER"} ${up ? "Up" : "Down"} a ${(t.price * 100).toFixed(0)}¢ (${t.reason}) · ${fmtClockHM(t.time)} · ${t.shares} tokens · ${t.amount} USDC · P motor ${(t.pSide * 100).toFixed(0)}% · edge ${(t.edge * 100).toFixed(1)}¢ · faltaban ${t.tau.toFixed(0)}s`}</title>
+                    <title>{`${buy ? "COMPRAR" : "VENDER"} ${up ? "Up" : "Down"} a ${(t.price * 100).toFixed(0)}¢ (${t.reason}${t.maker ? ", maker" : ""}) · ${fmtClockHM(t.time)}${showSignal ? ` · al decidir ${(t.signalPrice! * 100).toFixed(0)}¢, ejecutada ${((t.execTime! - t.time) / 1000).toFixed(1)} s después` : ""}${t.limit !== undefined ? ` · límite ${(t.limit * 100).toFixed(0)}¢` : ""} · ${t.shares} tokens · ${t.amount} USDC · P motor ${(t.pSide * 100).toFixed(0)}% · edge ${(t.edge * 100).toFixed(1)}¢ · faltaban ${t.tau.toFixed(0)}s`}</title>
                     <line x1={x} x2={x} y1={sec.top} y2={sec.bottom} strokeWidth={1} strokeDasharray="1 3" opacity={0.5} />
+                    {showSignal && <line x1={xOf(t.time)} y1={yProb(upEq(t.signalPrice!))} x2={x} y2={y} strokeWidth={1} strokeDasharray="2 2" opacity={0.8} />}
                     {buy ? <path d={`M${x},${y - 8}L${x - 6},${y + 4}L${x + 6},${y + 4}Z`} className="stroke-background" strokeWidth={1} /> : <path d={`M${x},${y + 8}L${x - 6},${y - 4}L${x + 6},${y - 4}Z`} className="stroke-background" strokeWidth={1} />}
                     <text x={x} y={buy ? y + 16 : y - 11} textAnchor="middle" className="stroke-none text-[9px] font-bold">
                       {`${buy ? "C" : "V"} ${up ? "Up" : "Dn"} ${(t.price * 100).toFixed(0)}¢`}

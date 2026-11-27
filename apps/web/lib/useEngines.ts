@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { CHANNELS, type EnginesServerMessage, type PmDecision, type PmEngineId, type PmEngineInfo, type PmEngineThresholds, type PmSignal } from "@updown/protocol";
+import { ENGINE_IDS } from "./engines";
 import { useWsChannel, type LinkState } from "./useWsChannel";
 
 export interface EngineTrack {
@@ -22,16 +23,16 @@ export interface EnginesView {
 
 const EMPTY: EngineTrack = { slug: null, decisions: [], trades: [] };
 const MAX_DECISIONS = 330; // un market de 5 min (1 por s) + margen
-const IDS: PmEngineId[] = ["a", "b", "c"];
+const IDS: PmEngineId[] = ENGINE_IDS;
 
 const track = (slug: string | null, decisions: PmDecision[]): EngineTrack => ({ slug, decisions, trades: decisions.flatMap((d) => d.signals) });
 
 /**
- * Canal /ws/engines (decisiones de los motores A, B y C). Solo se conecta con `enabled` (drawer abierto):
- * fuera de eso no consume red ni CPU. Los deltas (3 por segundo) se vuelcan a estado una vez por frame.
+ * Canal /ws/engines (decisiones de los motores A, C, D y E). Solo se conecta con `enabled` (drawer abierto):
+ * fuera de eso no consume red ni CPU. Los deltas (4 por segundo) se vuelcan a estado una vez por frame.
  */
 export function useEngines(enabled: boolean): EnginesView {
-  const [view, setView] = useState<Omit<EnginesView, "link">>({ thresholds: null, info: [], tracks: { a: EMPTY, b: EMPTY, c: EMPTY } });
+  const [view, setView] = useState<Omit<EnginesView, "link">>({ thresholds: null, info: [], tracks: { a: EMPTY, c: EMPTY, d: EMPTY, e: EMPTY } });
   const pending = useRef<EnginesServerMessage[]>([]);
   const frame = useRef(0);
 
@@ -49,7 +50,7 @@ export function useEngines(enabled: boolean): EnginesView {
         if (m.type === "snapshot") {
           next.thresholds = m.thresholds;
           next.info = m.engines;
-          for (const id of IDS) lists[id] = { slug: m.decisions[id].slug, decisions: m.decisions[id].decisions, dirty: true };
+          for (const id of IDS) lists[id] = { slug: m.decisions[id]?.slug ?? null, decisions: m.decisions[id]?.decisions ?? [], dirty: true };
         } else {
           const l = lists[m.engine];
           if (l.slug !== m.slug) lists[m.engine] = { slug: m.slug, decisions: [m.decision], dirty: true };

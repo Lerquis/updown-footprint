@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import type { PmEngineId, PmMarketRow, PmPnl, PmRecord, PmSignal } from "@updown/protocol";
+import type { PmEngineId, PmMarketRow, PmOrder, PmPnl, PmRecord, PmSignal } from "@updown/protocol";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -63,7 +63,7 @@ function Stat({ label, children, className = "" }: { label: string; children: Re
 const pct = (v: number | null) => (v === null ? "–" : `${(v * 100).toFixed(0)}%`);
 const money = (v: number | null) => (v === null ? "–" : `${sign(v)}${v.toFixed(2)}`);
 
-/** Compras / ventas de los tres motores en el market mostrado, por orden de tiempo. */
+/** Compras / ventas de los motores en el market mostrado, por orden de tiempo. */
 function TradesList({ engines, start }: { engines: EngineSeries[]; start: number }) {
   const all = engines.flatMap((e) => e.trades.map((t) => ({ e: e.id, t }))).sort((x, y) => x.t.time - y.t.time || x.e.localeCompare(y.e));
   if (!all.length) return <p className="text-[11px] text-muted-foreground">Ningún motor señaló operaciones en este market.</p>;
@@ -92,8 +92,19 @@ function TradesList({ engines, start }: { engines: EngineSeries[]; start: number
               <TableCell className={`font-semibold ${t.side === "up" ? "text-buy" : "text-sell"}`}>
                 {t.action === "buy" ? "COMPRAR" : "VENDER"} {t.side === "up" ? "Up" : "Down"}
               </TableCell>
-              <TableCell className="text-muted-foreground">{t.reason}</TableCell>
-              <TableCell className="text-right font-mono">{cents(t.price)}</TableCell>
+              <TableCell className="text-muted-foreground">
+                {t.reason}
+                {t.maker && <span className="ml-1 text-[10px] text-sky-400">maker</span>}
+              </TableCell>
+              <TableCell className="text-right font-mono" title={t.signalPrice !== undefined ? "precio al decidir → precio de la ejecución simulada (tras la latencia, contra el libro real)" : undefined}>
+                {t.signalPrice !== undefined && !t.maker && t.signalPrice !== t.price && (
+                  <span className="mr-1 text-muted-foreground">
+                    {cents(t.signalPrice)}→
+                  </span>
+                )}
+                {cents(t.price)}
+                {t.limit !== undefined && <span className="ml-1 text-[10px] text-muted-foreground">lím {cents(t.limit)}</span>}
+              </TableCell>
               <TableCell className="text-right font-mono">{t.shares}</TableCell>
               <TableCell className="text-right font-mono">{t.amount.toFixed(2)}</TableCell>
               <TableCell className="text-right font-mono">{pct(t.pSide)}</TableCell>
@@ -117,7 +128,7 @@ export function PolymarketPanel({ pm, flow }: { pm: PolymarketView; flow: Orderf
   // Decisiones de los motores: el canal solo se abre con el drawer abierto
   const [enginesOpen, setEnginesOpen] = useState(false);
   const eng = useEngines(enginesOpen);
-  // compras reales del motor C (canal /ws/trading)
+  // compras reales del motor A, C o D (canal /ws/trading)
   const tr = useTrading();
   const [now, setNow] = useState(() => exchangeClock.now());
   useEffect(() => {
@@ -151,18 +162,19 @@ export function PolymarketPanel({ pm, flow }: { pm: PolymarketView; flow: Orderf
       ...sliceFlow(pm.current, flow),
       trades: pm.trades,
       pnl: EMPTY_PNL,
-      engines: { b: run(pm.engines.b), c: run(pm.engines.c) },
+      engines: { c: run(pm.engines.c), d: run(pm.engines.d), e: run(pm.engines.e) },
       complete: true,
     };
   }, [isLive, picked, pm.current, pm.points, pm.trades, pm.engines, flow]);
 
-  // una serie por motor (A = points/trades del market; B y C en `engines`, ausentes en markets antiguos)
+  // una serie por motor (A = points/trades del market; C, D y E en `engines`, ausentes en markets antiguos)
   const series: EngineSeries[] = useMemo(() => {
     if (!view) return [];
-    const src: Record<PmEngineId, { points: PmRecord["points"]; trades: PmSignal[] } | undefined> = {
+    const src: Record<PmEngineId, { points: PmRecord["points"]; trades: PmSignal[]; orders?: PmOrder[] } | undefined> = {
       a: { points: view.points, trades: view.trades },
-      b: view.engines?.b,
       c: view.engines?.c,
+      d: view.engines?.d,
+      e: view.engines?.e,
     };
     const slug = view.market.slug;
     const real = tr.trades.filter((t) => t.slug === slug && t.status === "matched");
@@ -172,7 +184,8 @@ export function PolymarketPanel({ pm, flow }: { pm: PolymarketView; flow: Orderf
       desc: ENGINE_DESC[id],
       points: src[id]!.points,
       trades: src[id]!.trades,
-      real: id === "a" || id === "c" ? real.filter((t) => t.engine === id) : undefined,
+      orders: src[id]!.orders,
+      real: id === "a" || id === "c" || id === "d" ? real.filter((t) => t.engine === id) : undefined,
     }));
   }, [view, tr.trades]);
 
@@ -322,7 +335,11 @@ export function PolymarketPanel({ pm, flow }: { pm: PolymarketView; flow: Orderf
         {mk.error && <p className="text-[11px] text-yellow-500">No se pudo leer la lista de markets del servidor ({mk.error}).</p>}
         {mk.rows.length > 0 && (
           <div className="flex flex-col gap-0.5 text-[11px] text-muted-foreground">
-            <span>{mk.total} markets guardados. Resultados de papel (se asume seguir todas las señales con los precios reales); con pocos markets no son estadísticamente concluyentes.</span>
+            <span>
+              {mk.total} markets guardados. Resultados de papel: A y C se ejecutan al precio del segundo de la señal (optimista); D y E con la latencia
+              y el libro reales (D: la orden se ejecuta 1,5 s después y solo dentro de su límite; E: órdenes en reposo que se llenan cuando la cola del
+              libro se consume). Con pocos markets no son estadísticamente concluyentes.
+            </span>
             {totals.map((t) => (
               <span key={t.id}>
                 <b className="text-foreground">{ENGINE_LABEL[t.id]}</b>: {t.markets} con operaciones · invertido {t.invested.toFixed(2)} USDC · neto{" "}

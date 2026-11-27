@@ -461,6 +461,11 @@ export interface PmPoint {
   flow: number | null;
   /** Probabilidad de que el market termine Up segun el motor (0-1); null si no se pudo calcular */
   pModel: number | null;
+  /**
+   * Motores D y E: deriva esperada del precio en USD (unidades Chainlink) en los proximos segundos, predicha con el flujo de
+   * Binance (OFI, momentum, desequilibrio del libro). Ausente en A y C.
+   */
+  drift?: number | null;
 }
 
 export type PmSide = "up" | "down";
@@ -490,7 +495,46 @@ export interface PmSignal {
   edge: number;
   /** segundos que faltaban para el cierre del market */
   tau: number;
+  /**
+   * Motor D (y salidas de emergencia de E): peor precio aceptado (compra: maximo, venta: minimo), calculado para que la
+   * operacion siga teniendo EV positivo aunque el precio se mueva mientras Polymarket la registra. Las compras reales lo usan como limite de la orden FAK.
+   */
+  limit?: number;
+  /** Motores D y E (papel realista): precio en el instante de la decision. `price` es entonces el de la ejecucion simulada */
+  signalPrice?: number;
+  /** Motores D y E: instante de la ejecucion simulada (reloj de Binance, ms) */
+  execTime?: number;
+  /** Motor E: ejecutada como maker (orden en reposo; sin comision) */
+  maker?: boolean;
 }
+
+/**
+ * Orden en reposo (limite, maker) del motor E en el libro de Polymarket. Simulada con la cola real del libro y los trades de Polymarket.
+ * Ver docs/features/predictive-engines.md.
+ */
+export interface PmOrder {
+  id: string;
+  slug: string;
+  side: PmSide;
+  /** buy: entrada (bid en reposo) · sell: salida (ask en reposo) */
+  action: "buy" | "sell";
+  price: number;
+  shares: number;
+  /** decision de colocarla, entrada en el libro (tras la latencia de envio) y cancelacion pedida; reloj de Binance, ms */
+  placedAt: number;
+  liveAt: number;
+  cancelAt: number | null;
+  /** tokens por delante en la cola al entrar en el libro */
+  queueAhead: number;
+  filledShares: number;
+  /** primera ejecucion */
+  filledAt: number | null;
+  status: "pending" | "open" | "filled" | "cancelled";
+  /** por que se cancelo: edge (ya no compensa) · drift (el flujo se giro) · drop (la probabilidad cayo) · reprice (reposicion) · closing · stop · market */
+  cancelReason: PmCancelReason | null;
+}
+
+export type PmCancelReason = "edge" | "drift" | "drop" | "reprice" | "closing" | "stop" | "market";
 
 /** Resultado paper de las senales de un market (se asume que se siguen todas). */
 export interface PmPnl {
@@ -556,6 +600,8 @@ export interface PmEngineRun {
   points: PmPoint[];
   trades: PmSignal[];
   pnl: PmPnl;
+  /** motor E: ordenes en reposo colocadas, ejecutadas y canceladas (reposiciones) */
+  orders?: PmOrder[];
 }
 
 /** Operaciones y resultado de papel de un motor en un market (para la tabla) */
@@ -576,8 +622,11 @@ export interface PmRecord {
   /** senales de compra/venta del motor A durante la ventana */
   trades: PmSignal[];
   pnl: PmPnl;
-  /** motores B y C (mismas reglas, datos "a fecha" del segundo): sus muestras y operaciones. Ausente en markets antiguos */
-  engines?: Partial<Record<"b" | "c", PmEngineRun>>;
+  /**
+   * Motores C, D y E: sus muestras y operaciones. Ausente en markets antiguos. Los markets guardados antes del 26 nov pueden traer
+   * tambien `b` (motor B, eliminado): se ignora.
+   */
+  engines?: Partial<Record<PmSecondaryEngineId, PmEngineRun>>;
   /** true si el servidor tuvo datos de los 5 minutos completos (solo esos se guardan en la base de datos) */
   complete: boolean;
 }
@@ -592,8 +641,8 @@ export type PolymarketServerMessage =
       points: PmPoint[];
       /** senales del motor A del market en curso */
       trades: PmSignal[];
-      /** muestras y senales de los motores B y C en el market en curso */
-      engines: Record<"b" | "c", { points: PmPoint[]; trades: PmSignal[] }>;
+      /** muestras y senales de los motores C, D y E en el market en curso (E con sus ordenes) */
+      engines: Record<PmSecondaryEngineId, PmLiveRun>;
       /** markets terminados, antiguo -> reciente */
       history: PmRecord[];
       /** cuantos markets terminados guarda el servidor */
@@ -606,26 +655,39 @@ export type PolymarketServerMessage =
   | { type: "point"; engine: PmEngineId; point: PmPoint }
   /** senal de compra/venta de un motor en el market en curso */
   | { type: "signal"; engine: PmEngineId; signal: PmSignal }
+  /** orden en reposo del motor E nueva o actualizada (ejecucion, cancelacion): el cliente hace upsert por `id` */
+  | { type: "order"; engine: "e"; order: PmOrder }
   /** market terminado (o su resultado actualizado): el cliente hace upsert por slug */
   | { type: "record"; record: PmRecord }
   | { type: "status"; upstream: UpstreamState };
 
-// ───────────────────────── Canal engines (decisiones de los motores A, B y C) ─────────────────────────
+// ───────────────────────── Canal engines (decisiones de los motores A, C, D y E) ─────────────────────────
 
 /**
- * Tres motores con las mismas reglas, que deciden una vez por segundo de Binance en instantes distintos:
- * a: en el segundo exacto, lo antes posible, con lo ultimo recibido ("en vivo").
- * b: el segundo exacto + 300 ms, con datos "a fecha" de ese segundo (marca de tiempo <= T).
- * c: igual que b pero + 150 ms.
- * Los tres se guardan en la base de datos (A en `points`/`trades` del market, B y C en `engines`).
+ * a: reglas EV por segundo, en el segundo exacto con lo ultimo recibido ("en vivo").
+ * c: mismas reglas que A, el segundo + 150 ms con datos "a fecha" de ese segundo (marca de tiempo <= T).
+ * d: predictivo (taker): decide cada 100 ms con la deriva prevista por el flujo de Binance, EV contra el precio esperado al
+ *    ejecutar y precio limite; su papel simula la latencia de Polymarket.
+ * e: libro (maker): ordenes limite en reposo que se recolocan o cancelan cuando la idea muere; papel con la cola real del libro.
+ * Todos se guardan en la base de datos (A en `points`/`trades` del market, el resto en `engines`). El motor B (+300 ms) se elimino.
  */
-export type PmEngineId = "a" | "b" | "c";
+export type PmEngineId = "a" | "c" | "d" | "e";
+/** motores que se guardan en `PmRecord.engines` (A va en `points`/`trades`) */
+export type PmSecondaryEngineId = Exclude<PmEngineId, "a">;
+
+/** Muestras, senales y (motor E) ordenes de un motor en el market en curso */
+export interface PmLiveRun {
+  points: PmPoint[];
+  trades: PmSignal[];
+  orders?: PmOrder[];
+}
 
 /**
  * Por que un lado se compra / vende (ok) o no en ese segundo. Se informa el primer impedimento, en el orden en que el motor los evalua:
  * noData sin datos para el modelo · flat sin posicion (venta) · noQuote sin precio · warmup calentando · closing ultimos segundos ·
  * maxEntries tope de compras · justSold acaba de vender ese lado · spread demasiado ancho · holding ya tiene ese lado ·
- * cooldown espera tras la ultima senal · edge EV por debajo del umbral · stake importe minimo / tope por market.
+ * cooldown espera tras la ultima senal · edge EV por debajo del umbral · stake importe minimo / tope por market ·
+ * pending (D/E) orden enviada esperando ejecucion · quoting (E) orden en reposo en el libro · drift (E) el flujo de Binance no acompana.
  */
 export type PmBlock =
   | "ok"
@@ -640,7 +702,10 @@ export type PmBlock =
   | "holding"
   | "cooldown"
   | "edge"
-  | "stake";
+  | "stake"
+  | "pending"
+  | "quoting"
+  | "drift";
 
 /** Evaluacion de un lado (Up o Down) en un segundo. Edges en USDC por token. */
 export interface PmSideDecision {
@@ -675,7 +740,7 @@ export interface PmDecision {
   signals: PmSignal[];
 }
 
-/** Umbrales con que deciden los motores (los mismos para todos) */
+/** Umbrales con que decide un motor (A y C comparten los mismos; D y E tienen los suyos en `PmEngineInfo.thresholds`) */
 export interface PmEngineThresholds {
   minEdge: number;
   exitMargin: number;
@@ -687,10 +752,14 @@ export interface PmEngineThresholds {
 /** Como decide cada motor */
 export interface PmEngineInfo {
   id: PmEngineId;
-  /** live: lo ultimo recibido · asOf: datos con marca de tiempo <= segundo */
-  mode: "live" | "asOf";
-  /** ms tras el inicio del segundo de Binance en que decide */
+  /** live: lo ultimo recibido · asOf: datos con marca de tiempo <= segundo · fast: cada `delayMs` ms con lo ultimo recibido (D, E) */
+  mode: "live" | "asOf" | "fast";
+  /** live/asOf: ms tras el inicio del segundo de Binance en que decide · fast: cada cuantos ms decide */
   delayMs: number;
+  /** taker: compra/vende contra el libro · maker: deja ordenes limite en reposo */
+  kind: "taker" | "maker";
+  /** umbrales propios del motor (A y C comparten los de `thresholds`) */
+  thresholds: PmEngineThresholds;
 }
 
 export type EnginesServerMessage =
@@ -768,8 +837,8 @@ export type LatencyServerMessage =
  * en curso (se desactiva solo al terminar el market). Importe proporcional (paper / 5, 1..10 USDC) o el minimo posible; orden FAK.
  * Esta informacion de momento NO se guarda en la base: vive en memoria del servidor.
  */
-/** motor cuyas senales se ejecutan: A (T + 0, lo antes posible) o C (T + 150 ms) */
-export type LiveEngine = "a" | "c";
+/** motor cuyas senales se ejecutan: A (T + 0, lo antes posible), C (T + 150 ms) o D (predictivo, con precio limite propio) */
+export type LiveEngine = "a" | "c" | "d";
 /** scaled: paper / 5 (1..10 USDC) · min: lo minimo que acepta Polymarket y se puede vender despues (max(1 USDC, 5 tokens)) */
 export type LiveSizing = "scaled" | "min";
 export type LiveTradeStatus =
@@ -866,4 +935,72 @@ export interface TradingArmRequest {
   /** por defecto se mantiene el anterior (al arrancar: C y proporcional) */
   engine?: LiveEngine;
   sizing?: LiveSizing;
+}
+
+// ───────────────────────── Replays: motor A con ejecucion retrasada (GET /api/replays) ─────────────────────────
+
+/**
+ * Una orden del motor A ejecutada `delayS` segundos despues de la senal, con el libro de ese instante
+ * (ask al comprar, bid al vender). Ver docs/features/replays.md.
+ */
+export interface PmReplayFill {
+  /** segundo en que decidio el motor (reloj de Binance, ms) */
+  time: number;
+  /** instante de la muestra con que se ejecuto (reloj de Binance, ms); null si no hubo muestra (market ya cerrado) */
+  execTime: number | null;
+  action: "buy" | "sell";
+  side: PmSide;
+  reason: PmSignal["reason"];
+  /** precio de la senal (ask/bid en T) */
+  signalPrice: number;
+  /** precio real de la ejecucion retrasada; null si no se ejecuto */
+  execPrice: number | null;
+  /** tokens comprados / vendidos en la ejecucion (0 si no se ejecuto) */
+  shares: number;
+  /** USDC: coste con comision al comprar (mismo importe que la senal), ingreso neto al vender */
+  amount: number;
+  /** filled: ejecutada · missed: sin precio en ese instante (o market cerrado) · noPosition: venta sin tokens (su compra no se ejecuto) */
+  status: "filled" | "missed" | "noPosition";
+}
+
+/** Resultado del motor A en un market con un retraso dado (0 = ejecucion en el segundo de la senal, como el paper). */
+export interface PmReplayRun {
+  delayS: number;
+  fills: PmReplayFill[];
+  pnl: PmPnl;
+}
+
+export interface PmReplayMarket {
+  slug: string;
+  /** inicio y fin de la ventana, ms (reloj de Binance) */
+  start: number;
+  end: number;
+  result: "up" | "down";
+  /** generacion de la base de donde salio (v1: motor original; v2: motores A/B/C) */
+  generation: "v1" | "v2";
+  /** una ejecucion por retraso de `PmReplayReport.delays` (mismo orden) */
+  runs: PmReplayRun[];
+}
+
+/** Copia de la base (en el bucket R2) usada para el informe */
+export interface PmReplaySource {
+  generation: "v1" | "v2";
+  key: string;
+  /** bytes comprimidos */
+  size: number;
+  /** fecha del objeto en el bucket, ms */
+  lastModified: number;
+  /** markets que aporto (sin contar los que ya venian de otra copia) */
+  markets: number;
+}
+
+/** Respuesta de `GET /api/replays`: informe generado con `npm run replays -w @updown/server`. */
+export interface PmReplayReport {
+  /** siempre "a": se reproduce el motor A sobre las muestras guardadas */
+  engine: "a";
+  /** retrasos en segundos; 0 es la referencia (ejecucion inmediata) */
+  delays: number[];
+  sources: PmReplaySource[];
+  /** antiguo -> reciente */
+  markets: PmReplayMarket[];
 }

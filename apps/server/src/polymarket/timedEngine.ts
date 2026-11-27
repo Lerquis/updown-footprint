@@ -4,10 +4,10 @@ import { estimateSigma, flowScore, recentAvg } from "./model.js";
 import { DEFAULT_STRATEGY, SignalEngine, type StrategyConfig } from "./strategy.js";
 
 /**
- * Motores de senales cronometrados con el reloj de Binance (A, B y C). Todos aplican las mismas reglas
+ * Motores de senales cronometrados con el reloj de Binance (A y C). Ambos aplican las mismas reglas
  * (`SignalEngine`) una vez por segundo `T` de Binance, en `T + delayMs`, y se diferencian en que datos usan:
  * - `live` (A): lo ultimo recibido del libro y de Chainlink en ese instante (lo mas rapido; depende de la latencia).
- * - `asOf` (B, C): solo datos con marca de tiempo <= T (Polymarket y Chainlink marcan cada mensaje), para que
+ * - `asOf` (C): solo datos con marca de tiempo <= T (Polymarket y Chainlink marcan cada mensaje), para que
  *   servidores en lugares distintos vean la misma foto si los datos llegan antes de `delayMs`.
  * Binance: cada motor arma su propio CVD de 1 s con los aggTrades de tiempo < T (`SecondCvd`).
  * Ver docs/features/engines.md.

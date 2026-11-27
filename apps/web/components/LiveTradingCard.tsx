@@ -23,7 +23,7 @@ const STATUS: Record<LiveTrade["status"], { label: string; cls: string }> = {
 };
 
 /**
- * Interruptor de compras reales (motor C, solo el market en curso; se apaga solo al terminar) y registro de lo ejecutado:
+ * Interruptor de compras reales (motor A, C o D, solo el market en curso; se apaga solo al terminar) y registro de lo ejecutado:
  * señal vs. ejecución (precio y tiempo). Datos en memoria del servidor, no se guardan.
  */
 export function LiveTradingCard({ tr, slug }: { tr: TradingView; slug: string }) {
@@ -91,6 +91,9 @@ export function LiveTradingCard({ tr, slug }: { tr: TradingView; slug: string })
           </ToggleGroupItem>
           <ToggleGroupItem value="c" title="Motor C: decide 150 ms después del segundo">
             Motor C
+          </ToggleGroupItem>
+          <ToggleGroupItem value="d" title="Motor D: predictivo, decide cada 100 ms y envía cada orden con su propio límite (el peor precio que aún deja EV positivo)">
+            Motor D
           </ToggleGroupItem>
         </ToggleGroup>
         <ToggleGroup

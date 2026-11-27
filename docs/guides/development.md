@@ -37,17 +37,22 @@ Copiar `apps/*/.env.example` a `.env` / `.env.local` si se quiere cambiar la con
 | server | `PM_HISTORY` | 24 | Markets de Polymarket terminados guardados en memoria (24 × 5 min = 2 h) |
 | server | `PM_DB_PATH` | `data/polymarket.db` | SQLite: markets completos + todos los aggTrades y el heatmap (gitignored, crece sin límite). Se usa con la generación: `data/polymarket-v2.db`; la base sin sufijo es la generación anterior (se archiva una vez en R2, [ADR 0011](../decisions/0011-tres-motores-guardados-y-base-v2.md)) |
 | server | `PM_FEE_RATE`, `PM_SLIPPAGE`, `PM_MIN_EDGE`, `PM_EXIT_MARGIN`, `PM_BANKROLL`, `PM_KELLY_FRACTION`, `PM_MAX_STAKE_PCT`, `PM_MAX_MARKET_PCT`, `PM_MODEL_WEIGHT`, `PM_FLOW_GAIN`, `PM_WARMUP_S`, `PM_NO_ENTRY_S` | 0.05, 0.005, 0.04, 0.015, 1000, 0.25, 0.05, 0.1, 0.6, 0.3, 20, 10 | Parámetros del motor de señales (ver [signal-engine](../features/signal-engine.md)) |
-| server | `PM_ENGINE_A_DELAY_MS`, `PM_ENGINE_B_DELAY_MS`, `PM_ENGINE_C_DELAY_MS` | 0, 300, 150 | Retraso de cada motor tras cada segundo de Binance ([engines](../features/engines.md)) |
+| server | `PM_ENGINE_A_DELAY_MS`, `PM_ENGINE_C_DELAY_MS` | 0, 150 | Retraso de los motores A y C tras cada segundo de Binance ([engines](../features/engines.md)) |
+| server | `PM_FAST_TICK_MS`, `PM_FAST_MODEL_WEIGHT`, `PM_FAST_MODEL_WEIGHT_END`, `PM_DRIFT_GAIN`, `PM_CALIBRATION_PATH` | 100, 0.6, 0.3, 3, data/calibration.json | Motores D y E: cada cuánto deciden, mezcla modelo/mercado (normal y últimos 30 s), multiplicador de la deriva y calibración ([predictive-engines](../features/predictive-engines.md)) |
+| server | `PM_D_MIN_EDGE`, `PM_D_LIMIT_MARGIN`, `PM_D_EXIT_MARGIN`, `PM_D_NO_ENTRY_S` | 0.1, 0.03, 0.03, 20 | Motor D (predictivo, taker) |
+| server | `PM_E_EDGE`, `PM_E_EXIT_EDGE`, `PM_E_NEED_DRIFT`, `PM_E_DROP_CANCEL`, `PM_E_STOP`, `PM_E_MIN_REST_MS`, `PM_E_NO_ENTRY_S` | 0.05, 0.04, 0.05, 0.01, 0.15, 500, 20 | Motor E (libro, maker) |
+| server | `PM_PAPER_TAKER_LATENCY_MS`, `PM_PAPER_POST_LATENCY_MS`, `PM_PAPER_CANCEL_LATENCY_MS` | 1500, 150, 100 | Papel realista de D y E: retraso de una orden taker, de la entrada al libro de una maker y de una cancelación |
 | server | `PM_LIVE_WS_URL`, `PM_BOOK_WS_URL`, `PM_GAMMA_URL`, `PM_SITE_URL` | URLs de Polymarket | Endpoints upstream |
 | server | `PM_TWAP_SECONDS` | 60 | Ventana del TWAP de Chainlink para price to beat y cierre |
 | server | `PM_CLOB_API_KEY`, `PM_CLOB_SECRET`, `PM_CLOB_PASSPHRASE` | (vacío) | Credenciales CLOB para el TWAP en vivo (PolyBolt). **Solo en `apps/server/.env.local`**; sin ellas se usa el spot del RTDS |
 | server | `PM_CLOB_URL`, `PM_LATENCY_INTERVAL_MS`, `PM_LATENCY_KEEPALIVE_MS`, `PM_LATENCY_HISTORY` | clob.polymarket.com, 15000, 5000, 40 | Medición de latencia al CLOB ([latency](../features/latency.md)) |
 | server | `PM_SIGNER_ADDRESS` | (vacío) | EOA que creó la API key (`POLY_ADDRESS`); sin ella la sonda autenticada responde 401. Solo en `.env.local` |
-| server | `PM_WALLET_PRIVATE_KEY`, `TRADING_PASSWORD` | (vacío) | Compras reales del motor C; sin ellas, desactivado. **Solo en `.env.local`** ([live-trading](../features/live-trading.md)) |
+| server | `PM_WALLET_PRIVATE_KEY`, `TRADING_PASSWORD` | (vacío) | Compras reales del motor A, C o D; sin ellas, desactivado. **Solo en `.env.local`** ([live-trading](../features/live-trading.md)) |
 | server | `PM_LIVE_SCALE`, `PM_LIVE_MIN_USD`, `PM_LIVE_MAX_USD`, `PM_LIVE_MAX_MARKET_USD`, `PM_LIVE_SLIPPAGE` | 0.2, 1, 10, 40, 1 | Importe y tolerancia de las compras reales (1 = sin límite de precio) |
 | server | `PM_FUNDER_ADDRESS` | (vacío) | Proxy wallet de la cuenta: `maker` de la orden de prueba de latencia (firmada con ceros, nunca se ejecuta). Solo en `.env.local` |
 | server | `PM_TWAP_WS_URL` | wss://ws-live-v2.polymarket.com/ws | Endpoint PolyBolt |
 | server | `PM_SYMBOL`, `PM_VARIANT`, `PM_SLUG_PREFIX`, `PM_MARKET_MS` | BTC, fiveminute, btc-updown-5m, 300000 | Activo/timeframe (solo BTC 5m soportado) |
+| server | `REPLAY_DIR` | data/replays | Copias de R2 descargadas e informe (`report.json`) de los [replays](../features/replays.md) |
 | web | `NEXT_PUBLIC_WS_URL` | ws://localhost:4000 | Base WS del servidor |
 
 ## Verificación
@@ -55,6 +60,9 @@ Copiar `apps/*/.env.example` a `.env` / `.env.local` si se quiere cambiar la con
 - `GET /health` debe mostrar `ready: true`, `upstream: "connected"` y `depth.upstream: "connected"`; `memory` muestra cuánto hay guardado.
 - Probar un canal sin UI: `new WebSocket("ws://localhost:4000/ws/orderflow")` desde Node 22+ (el primer mensaje es el `snapshot`).
 - **Lógica de análisis nueva o cambiada ⇒ prueba unitaria** en `apps/server/src/analysis/analysis.test.ts` (son funciones puras, fáciles de probar).
+
+## Replays (motor A con retraso)
+`npm run replays -w @updown/server` descarga de R2 las bases v1 y v2 (necesita las variables `BACKUP_S3_*` en `apps/server/.env.local`), reproduce el motor A y escribe el informe. Se ve en `http://localhost:3000/replays` (solo por URL). Detalle: [replays](../features/replays.md).
 
 ## Procesos en Windows
 `npm run dev` usa `tsx watch` y `next dev`. Si se mata solo el proceso que escucha el puerto, el *watcher* padre lo vuelve a levantar (y deja `EADDRINUSE` al reintentar). Detener el **árbol** (`taskkill /PID <padre> /T /F`, el padre se ve con `Get-CimInstance Win32_Process`). No ejecutar `next build` y `next dev` sobre la misma carpeta `.next` (borrar `apps/web/.next` si da `__webpack_modules__ … is not a function`).

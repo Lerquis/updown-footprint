@@ -91,7 +91,7 @@ export const config = {
   pmFunderAddress: (process.env.PM_FUNDER_ADDRESS ?? "").trim(),
   // ── Latencia hacia el CLOB (/ws/latency, docs/features/latency.md): solo lectura, nunca opera ──
   pmLatencyIntervalMs: num(process.env.PM_LATENCY_INTERVAL_MS, 15_000),
-  // ── Compras reales del motor C (/ws/trading, docs/features/live-trading.md). Sin clave o sin contrasena: desactivado ──
+  // ── Compras reales del motor A, C o D (/ws/trading, docs/features/live-trading.md). Sin clave o sin contrasena: desactivado ──
   live: {
     /** clave privada de la EOA firmante (la de PM_SIGNER_ADDRESS). SOLO en .env.local / variables de Railway */
     privateKey: process.env.PM_WALLET_PRIVATE_KEY ?? "",
@@ -141,6 +141,8 @@ export const config = {
       secretAccessKey: process.env.BACKUP_S3_SECRET_ACCESS_KEY ?? "",
       region: process.env.BACKUP_S3_REGION ?? "auto",
     },
+    /** prefijo base (p. ej. updown/): ahi quedaron los backups de la generacion v1, sin carpeta propia */
+    rootPrefix: prefixBase,
     /** carpeta de los backups de esta generacion (p. ej. updown/v2/) */
     prefix: `${prefixBase}${DB_GENERATION}/`,
     /** carpeta del archivo final de la base anterior (p. ej. updown/archive/) */
@@ -174,15 +176,49 @@ export const config = {
   pmModelWeight: num(process.env.PM_MODEL_WEIGHT, 0.6),
   /** Cuanto desplaza el flujo la media (0 = ignorar el flujo) */
   pmFlowGain: num(process.env.PM_FLOW_GAIN, 0.3),
+  /** Replays del motor A con ejecucion retrasada (docs/features/replays.md): copias descargadas de R2 e informe (report.json) */
+  replayDir: process.env.REPLAY_DIR ?? "data/replays",
   pmWarmupS: num(process.env.PM_WARMUP_S, 20),
   pmNoEntryS: num(process.env.PM_NO_ENTRY_S, 10),
   /**
-   * Motores A, B y C (docs/features/engines.md): deciden cada segundo de Binance + este retraso (ms).
-   * A con lo ultimo recibido (lo antes posible); B y C con datos "a fecha" del segundo.
+   * Motores A y C (docs/features/engines.md): deciden cada segundo de Binance + este retraso (ms).
+   * A con lo ultimo recibido (lo antes posible); C con datos "a fecha" del segundo. (El motor B, +300 ms, se elimino.)
    */
   pmEngineDelayMs: {
     a: num(process.env.PM_ENGINE_A_DELAY_MS, 0),
-    b: num(process.env.PM_ENGINE_B_DELAY_MS, 300),
     c: num(process.env.PM_ENGINE_C_DELAY_MS, 150),
+  },
+  /** Motores D (predictivo, taker) y E (libro, maker): docs/features/predictive-engines.md */
+  pmFast: {
+    /** cada cuanto deciden (ms) */
+    tickMs: num(process.env.PM_FAST_TICK_MS, 100),
+    /** peso del modelo al mezclar con el mercado, y en los ultimos 30 s */
+    modelWeight: num(process.env.PM_FAST_MODEL_WEIGHT, 0.6),
+    modelWeightEnd: num(process.env.PM_FAST_MODEL_WEIGHT_END, 0.3),
+    /** multiplicador de la deriva prevista por el flujo de Binance (0 = ignorarla) */
+    driftGain: num(process.env.PM_DRIFT_GAIN, 3),
+    /** coeficientes de la deriva recalculados con `npm run calibrate` (si el archivo existe, se usan) */
+    calibrationPath: process.env.PM_CALIBRATION_PATH ?? "data/calibration.json",
+    d: {
+      minEdge: num(process.env.PM_D_MIN_EDGE, 0.1),
+      limitMargin: num(process.env.PM_D_LIMIT_MARGIN, 0.03),
+      exitMargin: num(process.env.PM_D_EXIT_MARGIN, 0.03),
+      noEntryS: num(process.env.PM_D_NO_ENTRY_S, 20),
+    },
+    e: {
+      edge: num(process.env.PM_E_EDGE, 0.05),
+      exitEdge: num(process.env.PM_E_EXIT_EDGE, 0.04),
+      needDrift: num(process.env.PM_E_NEED_DRIFT, 0.05),
+      dropCancel: num(process.env.PM_E_DROP_CANCEL, 0.01),
+      stop: num(process.env.PM_E_STOP, 0.15),
+      minRestMs: num(process.env.PM_E_MIN_REST_MS, 500),
+      noEntryS: num(process.env.PM_E_NO_ENTRY_S, 20),
+    },
+    /** papel realista: retraso de una orden taker hasta ejecutarse, de una orden maker hasta entrar al libro y de una cancelacion */
+    paper: {
+      takerLatencyMs: num(process.env.PM_PAPER_TAKER_LATENCY_MS, 1500),
+      postLatencyMs: num(process.env.PM_PAPER_POST_LATENCY_MS, 150),
+      cancelLatencyMs: num(process.env.PM_PAPER_CANCEL_LATENCY_MS, 100),
+    },
   },
 } as const;

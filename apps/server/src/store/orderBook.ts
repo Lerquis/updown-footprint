@@ -44,6 +44,11 @@ export class OrderBook {
     return a;
   }
 
+  /** Niveles crudos (precio, cantidad) para calculos de solo lectura (desequilibrio del libro de los motores D y E). */
+  sides(): { bids: Map<number, number>; asks: Map<number, number> } {
+    return { bids: this.bids, asks: this.asks };
+  }
+
   /**
    * Agrega el libro en buckets de `step` dentro de mid ± rangePct.
    * Devuelve null si el libro aun no es utilizable.

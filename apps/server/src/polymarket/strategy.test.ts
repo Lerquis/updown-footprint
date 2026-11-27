@@ -4,8 +4,8 @@ import type { CvdPoint, OrderflowSignal, PmMarket, PmPoint, PmRecord } from "@up
 import { blend, estimateSigma, flowScore, modelProbUp, normCdf, takerFee } from "./model.js";
 import { SignalEngine, computePnl, replayMarket, DEFAULT_STRATEGY, type StrategyConfig } from "./strategy.js";
 import { isComplete, buildRecord, type EngineTracks } from "./tracker.js";
-/** Solo motor A (B y C vacios) */
-const onlyA = (points: PmPoint[]): EngineTracks => ({ a: { points, trades: [] }, b: { points: [], trades: [] }, c: { points: [], trades: [] } });
+/** Solo motor A (C, D y E vacios) */
+const onlyA = (points: PmPoint[]): EngineTracks => ({ a: { points, trades: [] }, c: { points: [], trades: [] }, d: { points: [], trades: [] }, e: { points: [], trades: [] } });
 import { MarketStore, TRADES_LEAD_MS } from "./store.js";
 import { rebuildOrderflow } from "./rebuild.js";
 import { OrderflowEngine } from "../analysis/engine.js";

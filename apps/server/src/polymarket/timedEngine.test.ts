@@ -59,7 +59,7 @@ test("SecondCvd: mismos puntos que el motor de orderflow para los mismos trades"
 /** Mismos datos llegando en otro orden y con datos "del futuro" antes de decidir: las decisiones deben ser identicas. */
 test("motor asOf: decide lo mismo aunque los datos lleguen en otro orden o haya datos posteriores a T", () => {
   const cfg = { ...DEFAULT_STRATEGY, warmupS: 0 };
-  const opts = { id: "b" as const, mode: "asOf" as const, delayMs: 300, strategy: cfg, retentionMs: 900_000, decisionsMax: 400 };
+  const opts = { id: "c" as const, mode: "asOf" as const, delayMs: 150, strategy: cfg, retentionMs: 900_000, decisionsMax: 400 };
   const fa = new PmFeed();
   const fb = new PmFeed();
   const a = new TimedEngine(opts, fa);
@@ -119,7 +119,7 @@ test("motor live (A): usa lo ultimo recibido aunque su marca sea posterior a T; 
   const cfg = { ...DEFAULT_STRATEGY, warmupS: 0 };
   const feed = new PmFeed();
   const live = new TimedEngine({ id: "a", mode: "live", delayMs: 0, strategy: cfg, retentionMs: 900_000, decisionsMax: 10 }, feed);
-  const asOf = new TimedEngine({ id: "b", mode: "asOf", delayMs: 300, strategy: cfg, retentionMs: 900_000, decisionsMax: 10 }, feed);
+  const asOf = new TimedEngine({ id: "c", mode: "asOf", delayMs: 150, strategy: cfg, retentionMs: 900_000, decisionsMax: 10 }, feed);
   for (let i = 0; i < 400; i++) {
     const t = trade(i, T0 - 200_000 + i * 500);
     live.addTrade(t);

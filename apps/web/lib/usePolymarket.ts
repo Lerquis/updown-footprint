@@ -7,7 +7,9 @@ import {
   type FootprintBar,
   type OrderflowSignal,
   type PmMarket,
+  type PmOrder,
   type PmPoint,
+  type PmSecondaryEngineId,
   type PmRecord,
   type PmSignal,
   type PolymarketServerMessage,
@@ -15,12 +17,14 @@ import {
 } from "@updown/protocol";
 import { useWsChannel, type LinkState } from "./useWsChannel";
 
-/** Muestras y senales de un motor en el market en curso */
+/** Muestras, senales y (motor E) ordenes en reposo de un motor en el market en curso */
 export interface EngineLive {
   points: PmPoint[];
   trades: PmSignal[];
+  orders?: PmOrder[];
 }
 const EMPTY_LIVE: EngineLive = { points: [], trades: [] };
+const EMPTY_ENGINES: Record<PmSecondaryEngineId, EngineLive> = { c: EMPTY_LIVE, d: EMPTY_LIVE, e: { ...EMPTY_LIVE, orders: [] } };
 
 export interface PolymarketView {
   current: PmMarket | null;
@@ -29,8 +33,8 @@ export interface PolymarketView {
   points: PmPoint[];
   /** senales del motor A del market en curso */
   trades: PmSignal[];
-  /** motores B y C en el market en curso */
-  engines: Record<"b" | "c", EngineLive>;
+  /** motores C, D y E en el market en curso */
+  engines: Record<PmSecondaryEngineId, EngineLive>;
   /** terminados, antiguo -> reciente */
   history: PmRecord[];
   link: LinkState;
@@ -43,7 +47,7 @@ export function usePolymarket(): PolymarketView {
   const [next, setNext] = useState<PmMarket | null>(null);
   const [points, setPoints] = useState<PmPoint[]>([]);
   const [trades, setTrades] = useState<PmSignal[]>([]);
-  const [engines, setEngines] = useState<Record<"b" | "c", EngineLive>>({ b: EMPTY_LIVE, c: EMPTY_LIVE });
+  const [engines, setEngines] = useState<Record<PmSecondaryEngineId, EngineLive>>(EMPTY_ENGINES);
   const [history, setHistory] = useState<PmRecord[]>([]);
   const [upstream, setUpstream] = useState<UpstreamState>("connecting");
   const curStart = useRef(0);
@@ -56,7 +60,7 @@ export function usePolymarket(): PolymarketView {
         setNext(msg.next);
         setPoints(msg.points);
         setTrades(msg.trades);
-        setEngines(msg.engines);
+        setEngines({ ...EMPTY_ENGINES, ...msg.engines });
         setHistory(msg.history);
         setUpstream(msg.upstream);
         break;
@@ -65,7 +69,7 @@ export function usePolymarket(): PolymarketView {
         if (msg.current && msg.current.start !== curStart.current) {
           setPoints([]);
           setTrades([]);
-          setEngines({ b: EMPTY_LIVE, c: EMPTY_LIVE });
+          setEngines(EMPTY_ENGINES);
         }
         curStart.current = msg.current?.start ?? 0;
         setCurrent(msg.current);
@@ -87,6 +91,16 @@ export function usePolymarket(): PolymarketView {
           const id = msg.engine;
           setEngines((prev) => ({ ...prev, [id]: { ...prev[id], trades: add(prev[id].trades) } }));
         }
+        break;
+      }
+      case "order": {
+        const o = msg.order;
+        setEngines((prev) => {
+          const list = prev.e.orders ?? [];
+          const i = list.findIndex((x) => x.id === o.id);
+          const orders = i >= 0 ? list.map((x, j) => (j === i ? o : x)) : [...list, o].slice(-1000);
+          return { ...prev, e: { ...prev.e, orders } };
+        });
         break;
       }
       case "record":

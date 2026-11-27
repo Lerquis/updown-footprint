@@ -255,7 +255,7 @@ export class SignalEngine {
 }
 
 /** Resultado paper de una lista de senales. `result` null => aun sin resolver (net/roi null). Funcion pura. */
-export function computePnl(trades: PmSignal[], result: "up" | "down" | null): PmPnl {
+export function computePnl(trades: Pick<PmSignal, "action" | "side" | "shares" | "amount">[], result: "up" | "down" | null): PmPnl {
   let invested = 0;
   let sold = 0;
   const open = { up: 0, down: 0 };

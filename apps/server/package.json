@@ -9,7 +9,9 @@
     "start": "tsx --env-file-if-exists=.env.local src/index.ts",
     "typecheck": "tsc --noEmit -p .",
     "test": "tsx --test \"src/**/*.test.ts\"",
-    "backup": "tsx --env-file-if-exists=.env.local src/backup/cli.ts"
+    "backup": "tsx --env-file-if-exists=.env.local src/backup/cli.ts",
+    "replays": "tsx --env-file-if-exists=.env.local src/replay/build.ts",
+    "calibrate": "tsx --env-file-if-exists=.env.local src/research/calibrate.ts"
   },
   "dependencies": {
     "@polymarket/clob-client-v2": "^1.0.6",

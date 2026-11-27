@@ -1,4 +1,4 @@
-# Compras reales (motor A o C)
+# Compras reales (motor A, C o D)
 
 **Estado**: Implementada (requiere `PM_WALLET_PRIVATE_KEY` y `TRADING_PASSWORD` en el servidor).
 
@@ -7,17 +7,17 @@
 ## Reglas
 | Regla | Valor |
 |---|---|
-| Quién dispara | Las señales del motor elegido al activar: **A** (T + 0, lo antes posible) o **C** (T + 150 ms, por defecto) |
+| Quién dispara | Las señales del motor elegido al activar: **A** (T + 0, lo antes posible), **C** (T + 150 ms, por defecto) o **D** (predictivo, cada 100 ms; [predictive-engines](predictive-engines.md)) |
 | Cuándo | Solo con el interruptor activado, solo en el **market en curso**. Se apaga solo al cambiar de market y al reiniciar el servidor |
 | Importe de compra | **Proporcional:** paper ÷ 5 (`PM_LIVE_SCALE` 0.2), es decir, paper 5..50 → **1..10 USDC** (`PM_LIVE_MIN_USD`/`MAX_USD`). **Mínimo:** lo menos que acepta Polymarket y se puede vender después, `max(1 USDC, 5 tokens × precio de la señal)`. Se elige al activar |
 | Mínimo de Polymarket | Se sube a `max(1 USDC, 5 tokens × precio de la señal)` para poder venderlo después. Si no cabe en 10 USDC o en el tope del market, se omite |
 | Tope por market | 40 USDC en compras (`PM_LIVE_MAX_MARKET_USD`) |
 | Venta | Vende **todos** los tokens reales de ese lado (de las ejecuciones). Sin tokens reales: omitida |
-| Orden | **FAK** (llena lo que puede al instante y cancela el resto). **Sin límite de precio por defecto** (`PM_LIVE_SLIPPAGE` 1): compra hasta 0.99 y vende desde 0.01; lo que acota el riesgo es el importe en USDC. Con `PM_LIVE_SLIPPAGE=0.02` vuelve el límite señal ± 2¢, redondeado al tick 0.01 |
+| Orden | **FAK** (llena lo que puede al instante y cancela el resto). **A y C: sin límite de precio por defecto** (`PM_LIVE_SLIPPAGE` 1): compra hasta 0.99 y vende desde 0.01; lo que acota el riesgo es el importe en USDC. Con `PM_LIVE_SLIPPAGE=0.02` vuelve el límite señal ± 2¢, redondeado al tick 0.01. **D: el límite de su señal** (`PmSignal.limit`, el peor precio que aún deja 3¢ de EV) |
 | Fin del market | No se vende: Polymarket liquida los tokens ganadores (1 USDC) automáticamente |
 
 ## Flujo
-1. El motor C emite `PmSignal` en su paso (`index.ts`: `engines3.c.on("step")` → `liveTrader.onSignals`).
+1. El motor elegido emite `PmSignal`: A y C en su paso (`engines3[id].on("step")`), D al decidir (`fastRunner.on("intent")`, antes de su ejecución en papel) → `liveTrader.onSignals`.
 2. `LiveTrader` (`apps/server/src/polymarket/liveTrader.ts`) pone las órdenes en cola, en serie y en orden. Calcula el límite (`limitPriceFor`) y el importe (`realBuyUsd`).
 3. **Firma local** con `OrderBuilder` de `@polymarket/clob-client-v2` (EIP-712, `signatureType` 1 POLY_PROXY, maker = proxy wallet). Sin llamadas de red, ~5 ms.
 4. **Envío** por su propia conexión HTTP/2 caliente (`ClobH2`) con cabeceras L2 ([ADR 0012](../decisions/0012-conexion-http2-caliente-al-clob.md)).
@@ -43,7 +43,7 @@ Primeras 4 compras con límite ±2¢: todas `rejected` con "no orders found to m
 ## Seguridad
 - **Sin clave o sin contraseña: desactivado.** Si la clave no es la de `PM_SIGNER_ADDRESS`, también queda desactivado. `/ws/trading` informa el motivo.
 - **Interruptor protegido:** `POST /api/trading/arm` exige la cabecera `x-trading-password`, comparada en tiempo constante. Una contraseña incorrecta tarda 800 ms y se registra. La web la guarda en `localStorage` de ese navegador.
-- **Topes duros:** 10 USDC por orden y 40 USDC por market. Solo el motor C, solo el market en curso. Sin límite de precio, una compra puede ejecutarse muy por encima de la señal: el importe nunca supera esos topes.
+- **Topes duros:** 10 USDC por orden y 40 USDC por market. Solo el motor elegido, solo el market en curso. Sin límite de precio (A y C), una compra puede ejecutarse muy por encima de la señal: el importe nunca supera esos topes.
 - **La sonda de latencia no cambia:** sigue firmada con ceros (`PROBE_SIGNATURE`, [latency](latency.md)). La clave solo la usa `LiveTrader`.
 - **Secretos:** `PM_WALLET_PRIVATE_KEY` y `TRADING_PASSWORD` solo en `apps/server/.env.local` y en las variables de Railway.
 
@@ -57,7 +57,7 @@ Primeras 4 compras con límite ±2¢: todas `rejected` con "no orders found to m
 - `PolymarketChart`: en la sección del motor C, cada ejecución real es un **círculo amarillo** en (respuesta, precio real), unido con una línea a la señal.
 
 ## Protocolo
-[`/ws/trading`](../architecture/protocol.md#canal-wstrading-compras-reales-del-motor-c) y `POST /api/trading/arm`.
+[`/ws/trading`](../architecture/protocol.md#canal-wstrading-compras-reales-motor-a-c-o-d) y `POST /api/trading/arm`.
 
 ## Pendiente / ideas
 - Guardar las operaciones reales en la base (ahora viven en memoria; se pierden al reiniciar).
