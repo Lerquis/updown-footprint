@@ -8,13 +8,17 @@ El 27 nov (deploy del commit de latencia) el servidor de Railway arrancó con `/
 - **No había copia al apagar.** Railway avisa con SIGTERM antes de cada deploy, pero el servidor solo cerraba la base.
 - **`latest.json` se movió a la copia vacía.** El servidor arrancó vacío y a los 2 min hizo backup y lo apuntó como el más reciente. Si se hubiera restaurado, se habría restaurado la vacía.
 
-En el bucket se ve el mismo patrón en v1: cuatro copias el mismo día, una por deploy. El volumen no conservó la base entre deploys. La causa exacta en Railway sigue sin confirmarse; `/health` ahora informa `db.onVolume`.
+En el bucket se ve el mismo patrón en v1: cuatro copias el mismo día, una por deploy.
+
+**Causa (confirmada con `/health` → `db.path: "data/polymarket-v2.db"`, `onVolume: false`):** en las variables de Railway estaba `PM_DB_PATH=data/polymarket.db`, una ruta **relativa** copiada de `.env.example`. Esa variable pisaba la del Dockerfile (`/data/polymarket.db`), así que la base vivía en `/app/apps/server/data/`, dentro del contenedor, y se borraba en cada deploy. El volumen `/data` nunca se usó.
 
 ## Decisión
 - **Copias cada hora** (`BACKUP_INTERVAL_H`, por defecto 1).
 - **Retención:** todas las copias de las últimas 48 h (`BACKUP_KEEP_H`) y, de las anteriores, la primera de cada día UTC (`backupsToPrune`). Solo dentro del prefijo de la generación.
 - **Copia final al apagar:** en SIGTERM se hace backup antes de cerrar la base, con un máximo de `BACKUP_SHUTDOWN_TIMEOUT_S` (150 s). `railway.json` fija `drainingSeconds: 180`.
 - **`latest.json` nunca retrocede:** guarda `markets`. Una copia con menos markets que la apuntada se sube igual, pero el puntero no se mueve (`shouldMoveLatest`) y se registra con `console.error`.
+- **La base siempre va al volumen:** si Railway define `RAILWAY_VOLUME_MOUNT_PATH` y `PM_DB_PATH` queda fuera de él, se usa el mismo nombre de archivo dentro del volumen (`resolveDbPath`, con prueba) y se avisa en el log.
+- **Restauración por defecto en Railway** (`PM_DB_RESTORE`, por defecto `true` si existe `RAILWAY_ENVIRONMENT`). Solo actúa si falta la base.
 - **`/health` → `db`:** ruta, tamaño, `onVolume` (la carpeta es otro sistema de archivos que `/`) y estado del backup. En Railway, si `onVolume` es falso, se avisa en el log al arrancar.
 
 ## Alternativa descartada por ahora

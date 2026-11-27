@@ -1,10 +1,27 @@
+import { basename, join, resolve, sep } from "node:path";
+
 /**
  * Generacion de la base de datos: al cambiar el formato de lo que se guarda se empieza una base nueva
  * (`polymarket.db` -> `polymarket-v2.db`) y otra carpeta de backups, sin tocar lo anterior. Ver ADR 0011.
  */
 export const DB_GENERATION = "v2";
 const withGeneration = (path: string) => path.replace(/(\.db)?$/, `-${DB_GENERATION}.db`);
-const dbBase = process.env.PM_DB_PATH ?? "data/polymarket.db";
+
+/**
+ * Ruta de la base. Si hay un volumen montado (Railway define RAILWAY_VOLUME_MOUNT_PATH) y la ruta pedida queda FUERA de el,
+ * se usa el mismo nombre de archivo dentro del volumen: fuera del volumen la base se borra en cada deploy.
+ * (El 27 nov se perdieron ~22 h asi: PM_DB_PATH=data/polymarket.db relativo en Railway, ADR 0013.)
+ */
+export function resolveDbPath(requested: string, volumeMount: string | undefined): string {
+  if (!volumeMount) return requested;
+  const vol = resolve(volumeMount);
+  const abs = resolve(requested);
+  return abs === vol || abs.startsWith(vol + sep) ? requested : join(vol, basename(requested));
+}
+const dbRequested = process.env.PM_DB_PATH ?? "data/polymarket.db";
+const dbBase = resolveDbPath(dbRequested, process.env.RAILWAY_VOLUME_MOUNT_PATH);
+if (dbBase !== dbRequested)
+  console.warn(`[db] PM_DB_PATH=${dbRequested} esta fuera del volumen ${process.env.RAILWAY_VOLUME_MOUNT_PATH}: se usa ${dbBase}`);
 const prefixBase = process.env.BACKUP_PREFIX ?? "updown/";
 
 const num = (v: string | undefined, d: number) => (v && !Number.isNaN(Number(v)) ? Number(v) : d);
@@ -119,7 +136,8 @@ export const config = {
     /** Programar backups periodicos (false: solo restaurar / backups manuales) */
     enabled: bool(process.env.BACKUP_ENABLED, true),
     /** Al arrancar sin base, descargar el ultimo backup */
-    restore: bool(process.env.PM_DB_RESTORE, false),
+    /** en Railway por defecto si: restaurar solo actua si falta la base (nunca sobrescribe) */
+    restore: bool(process.env.PM_DB_RESTORE, Boolean(process.env.RAILWAY_ENVIRONMENT)),
   },
 
   // ── Motor de senales (ver docs/features/signal-engine.md) ──

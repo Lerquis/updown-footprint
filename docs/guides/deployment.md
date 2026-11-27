@@ -55,7 +55,8 @@ Para no empezar de cero, se sube la base local al bucket y Railway la descarga a
 | `BACKUP_S3_ENDPOINT` | `https://<account_id>.r2.cloudflarestorage.com` |
 | `BACKUP_S3_BUCKET` | `updown-backups` |
 | `BACKUP_S3_ACCESS_KEY_ID`, `BACKUP_S3_SECRET_ACCESS_KEY` | Token de R2 |
-| `PM_DB_RESTORE` | `true` (descarga la última copia si el volumen está vacío) |
+| `PM_DB_RESTORE` | `true` (descarga la última copia si el volumen está vacío). En Railway ya es el valor por defecto |
+| `PM_DB_PATH` | **No definirla.** El Dockerfile ya usa `/data/polymarket.db`. Una ruta relativa (`data/...`) dejaba la base fuera del volumen ([ADR 0013](../decisions/0013-backups-horarios-y-al-apagar.md)); ahora el servidor la corrige sola, pero mejor no definirla |
 | `RAILWAY_DEPLOYMENT_DRAINING_SECONDS` | **No definirla** (o `180`): `railway.json` ya fija `drainingSeconds: 180` para que dé tiempo al backup final. Con `10` el backup al apagar se corta |
 
 `PORT` lo pone Railway; el resto de variables tienen los mismos valores por defecto que en local ([development.md](development.md)).
