@@ -12,8 +12,10 @@ import type { OrderflowView } from "@/lib/useOrderflow";
 import { useFetchRecord, useMarketRows } from "@/lib/useMarketRows";
 import { sliceFlow, type PolymarketView } from "@/lib/usePolymarket";
 import { useEngines } from "@/lib/useEngines";
+import { useTrading } from "@/lib/useTrading";
 import { ENGINE_DESC, ENGINE_IDS, ENGINE_LABEL } from "@/lib/engines";
 import { EnginesDrawer } from "./EnginesDrawer";
+import { LiveTradingCard } from "./LiveTradingCard";
 import { LiveBadge } from "./LiveBadge";
 import { PolymarketChart, type EngineSeries } from "./PolymarketChart";
 
@@ -115,6 +117,8 @@ export function PolymarketPanel({ pm, flow }: { pm: PolymarketView; flow: Orderf
   // Decisiones de los motores: el canal solo se abre con el drawer abierto
   const [enginesOpen, setEnginesOpen] = useState(false);
   const eng = useEngines(enginesOpen);
+  // compras reales del motor C (canal /ws/trading)
+  const tr = useTrading();
   const [now, setNow] = useState(() => exchangeClock.now());
   useEffect(() => {
     const id = setInterval(() => setNow(exchangeClock.now()), 500);
@@ -160,8 +164,17 @@ export function PolymarketPanel({ pm, flow }: { pm: PolymarketView; flow: Orderf
       b: view.engines?.b,
       c: view.engines?.c,
     };
-    return ENGINE_IDS.filter((id) => src[id]).map((id) => ({ id, label: ENGINE_LABEL[id], desc: ENGINE_DESC[id], points: src[id]!.points, trades: src[id]!.trades }));
-  }, [view]);
+    const slug = view.market.slug;
+    const real = tr.trades.filter((t) => t.slug === slug && t.status === "matched");
+    return ENGINE_IDS.filter((id) => src[id]).map((id) => ({
+      id,
+      label: ENGINE_LABEL[id],
+      desc: ENGINE_DESC[id],
+      points: src[id]!.points,
+      trades: src[id]!.trades,
+      real: id === "c" ? real : undefined,
+    }));
+  }, [view, tr.trades]);
 
   const totals = useMemo(
     () =>
@@ -277,6 +290,7 @@ export function PolymarketPanel({ pm, flow }: { pm: PolymarketView; flow: Orderf
               </div>
             </div>
 
+            {isLive && <LiveTradingCard tr={tr} slug={m.slug} />}
             <div className="rounded-md border">
               <PolymarketChart market={m} points={view.points} bars={view.bars} cvd={view.cvd} signals={view.signals} engines={series} />
             </div>

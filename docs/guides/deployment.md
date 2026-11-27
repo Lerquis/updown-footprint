@@ -50,6 +50,7 @@ Para no empezar de cero, se sube la base local al bucket y Railway la descarga a
 | Variable | Valor |
 |---|---|
 | `PM_CLOB_API_KEY`, `PM_CLOB_SECRET`, `PM_CLOB_PASSPHRASE` | Las de `.env.local` (TWAP de Chainlink y latencia) |
+| `PM_WALLET_PRIVATE_KEY`, `TRADING_PASSWORD` | Compras reales del motor C ([live-trading](../features/live-trading.md)): clave privada de la EOA firmante y contraseña del interruptor. Sin ellas, desactivado |
 | `PM_SIGNER_ADDRESS`, `PM_FUNDER_ADDRESS` | Las de `.env.local`: signer y proxy wallet para la medida de latencia ([latency](../features/latency.md)). Sin ellas la orden de prueba responde 401 |
 | `ALLOWED_ORIGIN` | URL del frontend, p. ej. `https://updown.vercel.app` (vacío = cualquier origen) |
 | `BACKUP_S3_ENDPOINT` | `https://<account_id>.r2.cloudflarestorage.com` |

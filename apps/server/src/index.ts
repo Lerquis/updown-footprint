@@ -8,6 +8,8 @@ import {
   type DepthServerMessage,
   type EnginesServerMessage,
   type LatencyServerMessage,
+  type TradingArmRequest,
+  type TradingServerMessage,
   type OrderflowServerMessage,
   type PmEngineId,
   type PmMarketsResponse,
@@ -40,6 +42,7 @@ import { DbBackup } from "./backup/backup.js";
 import { PmFeed, scheduleEngine, TimedEngine } from "./polymarket/timedEngine.js";
 import { slotStart } from "./polymarket/tracker.js";
 import { LatencyMonitor } from "./polymarket/latency.js";
+import { LiveTrader } from "./polymarket/liveTrader.js";
 
 const SYMBOL = config.symbol.toUpperCase();
 
@@ -252,6 +255,20 @@ const latency = new Channel<LatencyServerMessage>(() => ({
   upstream: latencyMonitor.state,
 }));
 latencyMonitor.on("sample", (sample) => latency.broadcast({ type: "sample", sample }));
+
+// Compras reales siguiendo al motor C: solo con el interruptor de la web activado y solo en el market en curso
+const liveTrader = new LiveTrader(
+  {
+    clobUrl: config.pmClobUrl,
+    creds: { ...config.pmClob, address: config.pmSignerAddress, funder: config.pmFunderAddress },
+    ...config.live,
+  },
+  () => clock.now(),
+);
+console.log(`[live] compras reales: ${liveTrader.enabled ? "disponibles (interruptor apagado)" : `desactivadas (${liveTrader.disabledReason})`}`);
+const trading = new Channel<TradingServerMessage>(() => ({ type: "snapshot", state: liveTrader.state(), trades: liveTrader.trades.slice() }));
+liveTrader.on("state", (state) => trading.broadcast({ type: "state", state }));
+liveTrader.on("trade", (trade) => trading.broadcast({ type: "trade", trade }));
 latencyMonitor.on("state", (upstream) => latency.broadcast({ type: "status", upstream }));
 
 // ── Tuberia de trades: relleno historico + vivo, sin duplicados ──
@@ -288,13 +305,17 @@ tracker.on("quote", (q) => feed.onQuote(q.token, q.bid, q.ask, q.time ?? clock.n
 for (const id of ENGINE_IDS) {
   engines3[id].on("step", (st) => {
     tracker.addStep(id, st.slug, st.point, st.signals);
+    if (id === "c" && st.signals.length) liveTrader.onSignals(st.signals, tracker.current);
     engines.broadcast({ type: "decision", engine: id, slug: st.slug, decision: st.decision });
   });
 }
 const pmStatus = () => polymarket.broadcast({ type: "status", upstream: pmUpstream() });
 tracker.on("status", pmStatus);
 chainlink.on("state", pmStatus);
-tracker.on("markets", (current, next) => ready && polymarket.broadcast({ type: "markets", current, next }));
+tracker.on("markets", (current, next) => {
+  liveTrader.onMarket(current);
+  if (ready) polymarket.broadcast({ type: "markets", current, next });
+});
 tracker.on("point", (engine, point) => ready && polymarket.broadcast({ type: "point", engine, point }));
 tracker.on("signal", (engine, signal) => ready && polymarket.broadcast({ type: "signal", engine, signal }));
 tracker.on("record", (record) => {
@@ -360,7 +381,7 @@ const http = createServer((req, res) => {
         ready,
         upstream: upstream.state,
         memory: { trades: buffer.size, depthColumns: depthHistory.size, bars: engine.bars.length, cvdPoints: engine.cvdPoints.length, signals: engine.signals.length },
-        clients: { aggTrades: aggTrades.size, depth: depth.size, orderflow: orderflow.size, analysis: analysis.size, polymarket: polymarket.size, engines: engines.size, latency: latency.size },
+        clients: { aggTrades: aggTrades.size, depth: depth.size, orderflow: orderflow.size, analysis: analysis.size, polymarket: polymarket.size, engines: engines.size, latency: latency.size, trading: trading.size },
         polymarket: { upstream: pmUpstream(), chainlink: chainlink.state, current: tracker.current?.slug ?? null, history: tracker.history.length, saved: marketStore.count(), engines: Object.fromEntries(ENGINE_IDS.map((id) => [id, { market: engines3[id].slug, decisions: engines3[id].decisions.length, delayMs: config.pmEngineDelayMs[id] }])) },
         depth: { upstream: depthClient.state },
         db: dbInfo(),
@@ -370,6 +391,43 @@ const http = createServer((req, res) => {
     return;
   }
   const url = new URL(req.url ?? "/", "http://localhost");
+  // Interruptor de compras reales (motor C, market en curso). Protegido con TRADING_PASSWORD (cabecera x-trading-password).
+  if (url.pathname === "/api/trading/arm") {
+    const cors = {
+      "access-control-allow-origin": config.allowedOrigin || "*",
+      "access-control-allow-methods": "POST, OPTIONS",
+      "access-control-allow-headers": "content-type, x-trading-password",
+    };
+    if (req.method === "OPTIONS") return void res.writeHead(204, cors).end();
+    if (req.method !== "POST") return void res.writeHead(405, cors).end();
+    let raw = "";
+    req.setEncoding("utf8");
+    req.on("data", (d: string) => {
+      raw += d;
+      if (raw.length > 4096) req.destroy();
+    });
+    req.on("end", () => {
+      const reply = (status: number, body: unknown) => {
+        res.writeHead(status, { ...cors, "content-type": "application/json" });
+        res.end(JSON.stringify(body));
+      };
+      const pass = req.headers["x-trading-password"];
+      if (!liveTrader.checkPassword(typeof pass === "string" ? pass : undefined)) {
+        console.warn("[live] contrasena incorrecta en /api/trading/arm");
+        // un poco de espera ante contrasenas incorrectas: frena los intentos a ciegas
+        return void setTimeout(() => reply(401, { error: "contrasena incorrecta" }), 800);
+      }
+      let body: TradingArmRequest;
+      try {
+        body = JSON.parse(raw) as TradingArmRequest;
+      } catch {
+        return reply(400, { error: "cuerpo invalido" });
+      }
+      const err = liveTrader.setArmed(String(body.slug ?? ""), body.armed === true);
+      reply(err ? 409 : 200, err ? { error: err, state: liveTrader.state() } : { state: liveTrader.state() });
+    });
+    return;
+  }
   if (url.pathname === "/api/markets" && req.method === "GET") {
     // resumen de todos los markets guardados (sin points/barras): ?limit=&from=&to=&order=asc|desc
     const q = url.searchParams;
@@ -409,6 +467,7 @@ mount(CHANNELS.analysis, analysis);
 mount(CHANNELS.polymarket, polymarket);
 mount(CHANNELS.engines, engines);
 mount(CHANNELS.latency, latency);
+mount(CHANNELS.trading, trading);
 
 http.on("upgrade", (req, socket, head) => {
   const origin = req.headers.origin;
@@ -431,6 +490,8 @@ http.listen(config.port, async () => {
   depthClient.start();
   chainlink.start();
   latencyMonitor.start();
+  liveTrader.onMarket(tracker.current);
+  liveTrader.start();
 
   if (config.backfill) {
     const t0 = Date.now();
@@ -479,6 +540,7 @@ const shutdown = async (signal: string) => {
   step("depth", () => depthClient.stop());
   step("chainlink", () => chainlink.stop());
   step("latency", () => latencyMonitor.stop());
+  step("live", () => liveTrader.stop());
   step("tracker", () => tracker.stop());
   step("backup timer", () => dbBackup?.stop());
   step("db flush", () => marketStore.flush());

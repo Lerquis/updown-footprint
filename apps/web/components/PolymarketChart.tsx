@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { CvdPoint, FootprintBar, OrderflowSignal, PmEngineId, PmMarket, PmPoint, PmSignal } from "@updown/protocol";
+import type { CvdPoint, FootprintBar, LiveTrade, OrderflowSignal, PmEngineId, PmMarket, PmPoint, PmSignal } from "@updown/protocol";
 import { biasArrow, fmtClockHM, SIGNAL_INFO } from "@/lib/flow";
 import { mid } from "@/lib/usePolymarket";
 
@@ -12,6 +12,8 @@ export interface EngineSeries {
   desc: string;
   points: PmPoint[];
   trades: PmSignal[];
+  /** operaciones REALES ejecutadas siguiendo a este motor (solo motor C, market en curso) */
+  real?: LiveTrade[];
 }
 
 interface Props {
@@ -112,7 +114,7 @@ export function PolymarketChart({ market, points, bars, cvd, signals, engines }:
           return { time: p.time, v: u !== null && d !== null ? (u + 1 - d) / 2 : u !== null ? u : d !== null ? 1 - d : null };
         })
         .filter((p): p is { time: number; v: number } => p.v !== null);
-      return { id: e.id, eng, mkt, trades: e.trades };
+      return { id: e.id, eng, mkt, trades: e.trades, real: e.real ?? [] };
     });
     const [qLo, qHi] = extent(probs.flatMap((pr) => [...pr.eng, ...pr.mkt].map((p) => p.v)), 0.1, 0.2);
     const prLo = Math.max(0, qLo);
@@ -232,6 +234,25 @@ export function PolymarketChart({ market, points, bars, cvd, signals, engines }:
               ))}
               <path d={path(pr.mkt.map((p) => [xOf(p.time), yProb(p.v)]))} className="fill-none stroke-foreground" strokeWidth={1.2} opacity={0.7} />
               <path d={path(pr.eng.map((p) => [xOf(p.time), yProb(p.v)]))} className="fill-none stroke-violet-400" strokeWidth={1.8} />
+              {/* compras/ventas reales: circulo hueco donde se ejecuto, unido a la señal (distancia en tiempo y precio) */}
+              {pr.real.map((t) => {
+                if (t.avgPrice === null || t.respondedAt === null) return null;
+                const upEq = (p: number) => Math.min(data.prHi, Math.max(data.prLo, t.side === "up" ? p : 1 - p));
+                const x0 = xOf(t.signalTime);
+                const y0 = yProb(upEq(t.signalPrice));
+                const x = xOf(t.respondedAt);
+                const y = yProb(upEq(t.avgPrice));
+                return (
+                  <g key={`real-${t.signalId}`} className="stroke-yellow-400">
+                    <title>{`REAL: ${t.action === "buy" ? "compra" : "venta"} ${t.side === "up" ? "Up" : "Down"} ${t.filledShares.toFixed(2)} tokens a ${(t.avgPrice * 100).toFixed(1)}¢ (señal ${(t.signalPrice * 100).toFixed(1)}¢) · ${t.respondedAt - t.signalTime} ms desde la señal · orden ${t.latencyMs ?? "–"} ms`}</title>
+                    <line x1={x0} y1={y0} x2={x} y2={y} strokeWidth={1.2} strokeDasharray="2 2" />
+                    <circle cx={x} cy={y} r={6} className="fill-none" strokeWidth={2} />
+                    <text x={x + 8} y={y - 6} className="fill-yellow-400 stroke-none text-[9px] font-bold">
+                      REAL {(t.avgPrice * 100).toFixed(0)}¢
+                    </text>
+                  </g>
+                );
+              })}
               {pr.trades.map((t) => {
                 // Up-equivalente: comprar/vender Down a q equivale a 1-q en la escala de Up
                 const v = t.side === "up" ? t.price : 1 - t.price;

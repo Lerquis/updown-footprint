@@ -12,7 +12,9 @@
     "backup": "tsx --env-file-if-exists=.env.local src/backup/cli.ts"
   },
   "dependencies": {
+    "@polymarket/clob-client-v2": "^1.0.6",
     "@updown/protocol": "*",
+    "viem": "^2.58.8",
     "ws": "^8.18.0"
   },
   "devDependencies": {

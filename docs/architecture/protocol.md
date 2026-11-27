@@ -90,6 +90,20 @@ El servidor mide cada `intervalMs` (15 s) la latencia al CLOB de Polymarket (nun
 - `status`: `{ upstream }`: `connected` si el último `ping` respondió.
 - `LatencySample`: `time` (inicio de la ronda, reloj de Binance), `probes: { connect|edge|ping|book|auth|order: { ms: number | null, status: number | null, detail? (mensaje de Polymarket), error? (red) } }`, `prepMs` (preparar la orden: cuerpo + HMAC), `estimateMs` (`prepMs` + `order`, o `auth`, o `ping` si fallan; el precio sale del libro por WS).
 
+## Canal `/ws/trading` (compras reales del motor C)
+Compras/ventas reales que siguen al motor C, con el interruptor activado y solo en el market en curso. Ver [live-trading](../features/live-trading.md).
+- `snapshot`: `{ state: LiveTradingState, trades: LiveTrade[] }`.
+- `state`: `{ state }` cuando se activa o desactiva el interruptor, cambia el market o cambia la posición.
+- `trade`: `{ trade: LiveTrade }` en cada orden enviada u omitida.
+- `LiveTradingState`: `enabled`, `disabledReason`, `armedSlug` (market activado o null), `currentSlug`, `limits` (`scale`, `minUsd`, `maxUsd`, `maxMarketUsd`, `slippage`), `position` (`up`/`down`: `shares`, `costUsd`), `spentUsd`.
+- `LiveTrade`:
+  - qué y por qué: `signalId`, `slug`, `action`, `side`, `reason`;
+  - la señal: `signalTime` y `signalPrice` (reloj de Binance), `paperAmount`;
+  - lo pedido: `requestedUsd` (compra) o `requestedShares` (venta), `limitPrice`;
+  - tiempos: `sentAt`, `respondedAt`, `latencyMs`, `signMs`;
+  - resultado: `status` (`matched|delayed|unmatched|rejected|error|skipped`), `filledShares`, `filledUsd`, `avgPrice`, `slippage` (+ = peor que la señal), `orderId`, `detail`.
+- `POST /api/trading/arm` con la cabecera `x-trading-password` y el cuerpo `TradingArmRequest` `{ slug, armed }` → `{ state }` o `{ error, state? }`. Respuestas: 401 contraseña incorrecta · 409 no disponible o market que no está en curso.
+
 ## Otros endpoints
 - `GET /health` → `{ ok, ready, upstream, memory: {trades, depthColumns, bars, cvdPoints, signals}, clients: {…por canal}, depth: {upstream}, latency: {authReady, last}, polymarket: {upstream, chainlink, current, history, saved, engines: {a|b|c: {market, decisions, delayMs}}} }`. `ready` pasa a `true` cuando termina el relleno inicial.
 - `GET /api/markets` → `PmMarketsResponse`: `{ total, markets: PmMarketRow[] }` con una fila resumen por market guardado en la base de datos (lo justo para la tabla del historial: price to beat, cierre, cambio %, resultado, delta footprint, Δ CVD, señales alcistas/bajistas, Up inicio→fin, operaciones del motor, invertido/vendido/neto, `engineVersion`, `tradesOk`). No incluye `points`, barras ni CVD. Parámetros opcionales: `limit` (por defecto todos), `from` / `to` (filtran por inicio en ms; `to` exclusivo) y `order=asc|desc` (por defecto `desc`, más recientes primero). CORS abierto salvo que `ALLOWED_ORIGIN` esté definido. `GET /api/markets/<slug>` → el `PmRecord` completo de un market guardado (404 si no existe; ~100 KB). El resumen se calcula al guardar (columnas de `markets`), así que listar cientos de markets no lee el JSON.

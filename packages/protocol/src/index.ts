@@ -29,6 +29,7 @@ export const CHANNELS = {
   polymarket: "/ws/polymarket",
   engines: "/ws/engines",
   latency: "/ws/latency",
+  trading: "/ws/trading",
 } as const;
 
 // ───────────────────────── Canal aggTrades ─────────────────────────
@@ -759,3 +760,91 @@ export type LatencyServerMessage =
     }
   | { type: "sample"; sample: LatencySample }
   | { type: "status"; upstream: UpstreamState };
+
+// ───────────────────────── Canal trading (compras reales del motor C) ─────────────────────────
+
+/**
+ * Compras/ventas REALES en Polymarket que sigue al motor C, solo con el interruptor activado y solo en el market en curso
+ * (se desactiva solo al terminar el market). Importe = paper / 5, entre 1 y 10 USDC; orden FAK con precio limite senal ± 2c.
+ * Esta informacion de momento NO se guarda en la base: vive en memoria del servidor.
+ */
+export type LiveTradeStatus =
+  /** casada (total o parcialmente) */
+  | "matched"
+  /** aceptada con retraso de matching (no deberia pasar en BTC 5m) */
+  | "delayed"
+  /** aceptada sin casar: no habia liquidez dentro del limite */
+  | "unmatched"
+  /** rechazada por Polymarket */
+  | "rejected"
+  /** fallo de red / firma / timeout */
+  | "error"
+  /** no se envio (sin posicion que vender, fuera de limites...) */
+  | "skipped";
+
+export interface LiveTrade {
+  /** id de la senal del motor C que la disparo */
+  signalId: string;
+  slug: string;
+  action: "buy" | "sell";
+  side: PmSide;
+  reason: PmSignal["reason"];
+  /** instante de la senal (segundo de Binance que decidio el motor C), reloj de Binance */
+  signalTime: number;
+  /** precio de la senal (ask al comprar, bid al vender) */
+  signalPrice: number;
+  /** importe paper de la senal (USDC) */
+  paperAmount: number;
+  /** compra: USDC pedidos · venta: null */
+  requestedUsd: number | null;
+  /** venta: tokens a vender · compra: null */
+  requestedShares: number | null;
+  /** peor precio aceptado (senal +2c al comprar, -2c al vender) */
+  limitPrice: number;
+  /** envio de la orden y llegada de la respuesta, reloj de Binance; null si no se envio */
+  sentAt: number | null;
+  respondedAt: number | null;
+  /** ida y vuelta de POST /order (ms) */
+  latencyMs: number | null;
+  /** firmar la orden en local (ms) */
+  signMs: number | null;
+  status: LiveTradeStatus;
+  filledShares: number;
+  /** compra: USDC gastados · venta: USDC recibidos */
+  filledUsd: number;
+  /** precio medio real (USDC por token); null sin ejecucion */
+  avgPrice: number | null;
+  /** precio real - precio de la senal, en el sentido desfavorable (+ = peor que la senal); null sin ejecucion */
+  slippage: number | null;
+  orderId: string | null;
+  /** mensaje de Polymarket o del servidor */
+  detail: string | null;
+}
+
+export interface LiveTradingState {
+  /** hay clave privada y contrasena configuradas en el servidor */
+  enabled: boolean;
+  /** por que esta desactivado (si `enabled` es false) */
+  disabledReason: string | null;
+  /** market en el que el interruptor esta activado; null = apagado */
+  armedSlug: string | null;
+  /** market en curso (el unico que se puede activar) */
+  currentSlug: string | null;
+  limits: { scale: number; minUsd: number; maxUsd: number; maxMarketUsd: number; slippage: number };
+  /** posicion real en el market activado (de las ejecuciones) */
+  position: Record<PmSide, { shares: number; costUsd: number }>;
+  /** USDC gastados en compras en el market activado */
+  spentUsd: number;
+}
+
+export type TradingServerMessage =
+  | { type: "snapshot"; state: LiveTradingState; trades: LiveTrade[] }
+  | { type: "state"; state: LiveTradingState }
+  /** nueva operacion real (o intento) */
+  | { type: "trade"; trade: LiveTrade };
+
+/** POST /api/trading/arm (cabecera `x-trading-password`): activar o desactivar las compras reales en el market en curso. */
+export interface TradingArmRequest {
+  slug: string;
+  armed: boolean;
+}

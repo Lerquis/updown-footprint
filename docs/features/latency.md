@@ -32,7 +32,7 @@ Polymarket valida en orden y la rechaza en el último paso antes del matching (c
 4. **Firma → 400 `invalid POLY_PROXY signature`** ← aquí se detiene siempre.
 
 **Garantías de que nunca compra**:
-- La barrera es la firma. El servidor no tiene private key (no hay ninguna variable que la lea), así que no puede producir una firma válida. El precio límite NO es una barrera: al final de un market el lado perdedor puede tener asks a 0.01.
+- La barrera es la firma: la orden de prueba lleva siempre `PROBE_SIGNATURE` (ceros) y no pasa por ningún firmante. La clave privada (`PM_WALLET_PRIVATE_KEY`, si está) solo la usa `LiveTrader` para las compras reales del motor C con el interruptor activado ([live-trading](live-trading.md)). El precio límite NO es una barrera: al final de un market el lado perdedor puede tener asks a 0.01.
 - Prueba unitaria (`latency.test.ts`) que fija la firma a ceros.
 - Salvaguarda: si Polymarket respondiera alguna vez 2xx, la sonda se desactiva para siempre y lo registra con `console.error`.
 - Sin proxy wallet o sin market en curso, envía `{}` (se rechaza antes, en la validación).

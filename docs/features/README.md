@@ -10,6 +10,7 @@
 | Markets Polymarket BTC Up/Down 5m (en vivo + historial) | Implementada | [polymarket-markets.md](polymarket-markets.md) |
 | Motores A, B y C (cronometrados, los tres guardados) y drawer de decisiones | Implementada | [engines.md](engines.md) |
 | Latencia al CLOB de Polymarket (cada 15 s, solo lectura) | Implementada | [latency.md](latency.md) |
+| Compras reales del motor C (interruptor por market, 1–10 USDC) | Implementada | [live-trading.md](live-trading.md) |
 
 ## Formato de un feature doc
 `# Nombre` · **Estado** · **Objetivo** · **Servidor** (archivos/flujo) · **Frontend** (archivos) · **Protocolo** (enlace a `protocol.md`) · **Pendiente / ideas**.

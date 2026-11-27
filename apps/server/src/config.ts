@@ -91,6 +91,22 @@ export const config = {
   pmFunderAddress: (process.env.PM_FUNDER_ADDRESS ?? "").trim(),
   // ── Latencia hacia el CLOB (/ws/latency, docs/features/latency.md): solo lectura, nunca opera ──
   pmLatencyIntervalMs: num(process.env.PM_LATENCY_INTERVAL_MS, 15_000),
+  // ── Compras reales del motor C (/ws/trading, docs/features/live-trading.md). Sin clave o sin contrasena: desactivado ──
+  live: {
+    /** clave privada de la EOA firmante (la de PM_SIGNER_ADDRESS). SOLO en .env.local / variables de Railway */
+    privateKey: process.env.PM_WALLET_PRIVATE_KEY ?? "",
+    /** contrasena del interruptor de la web (cabecera x-trading-password) */
+    password: process.env.TRADING_PASSWORD ?? "",
+    /** real = paper x scale (paper 5..50 USDC -> 1..10) */
+    scale: num(process.env.PM_LIVE_SCALE, 0.2),
+    minUsd: num(process.env.PM_LIVE_MIN_USD, 1),
+    maxUsd: num(process.env.PM_LIVE_MAX_USD, 10),
+    maxMarketUsd: num(process.env.PM_LIVE_MAX_MARKET_USD, 40),
+    /** peor precio aceptado frente a la senal (0.02 = 2c) */
+    slippage: num(process.env.PM_LIVE_SLIPPAGE, 0.02),
+    tick: 0.01,
+    minShares: 5,
+  },
   /** PING de HTTP/2 para mantener caliente la conexion al CLOB */
   pmLatencyKeepAliveMs: num(process.env.PM_LATENCY_KEEPALIVE_MS, 5_000),
   /** desde donde mide el servidor (Railway la define; en local no existe) */
