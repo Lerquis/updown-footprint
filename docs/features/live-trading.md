@@ -10,10 +10,10 @@
 | Quién dispara | Solo las señales del **motor C** (`TimedEngine` c, T + 150 ms) |
 | Cuándo | Solo con el interruptor activado, solo en el **market en curso**. Se apaga solo al cambiar de market y al reiniciar el servidor |
 | Importe de compra | Paper ÷ 5 (`PM_LIVE_SCALE` 0.2): paper 5..50 → **1..10 USDC** (`PM_LIVE_MIN_USD`/`MAX_USD`) |
-| Mínimo de Polymarket | Se sube a `max(1 USDC, 5 tokens × precio límite)` para poder venderlo después. Si no cabe en 10 USDC o en el tope del market, se omite |
+| Mínimo de Polymarket | Se sube a `max(1 USDC, 5 tokens × precio de la señal)` para poder venderlo después. Si no cabe en 10 USDC o en el tope del market, se omite |
 | Tope por market | 40 USDC en compras (`PM_LIVE_MAX_MARKET_USD`) |
 | Venta | Vende **todos** los tokens reales de ese lado (de las ejecuciones). Sin tokens reales: omitida |
-| Orden | **FAK** (llena lo que puede al instante y cancela el resto) con **precio límite**: compra ≤ señal + 2¢, venta ≥ señal − 2¢ (`PM_LIVE_SLIPPAGE`), redondeado al tick 0.01. Polymarket hace cumplir el límite |
+| Orden | **FAK** (llena lo que puede al instante y cancela el resto). **Sin límite de precio por defecto** (`PM_LIVE_SLIPPAGE` 1): compra hasta 0.99 y vende desde 0.01; lo que acota el riesgo es el importe en USDC. Con `PM_LIVE_SLIPPAGE=0.02` vuelve el límite señal ± 2¢, redondeado al tick 0.01 |
 | Fin del market | No se vende: Polymarket liquida los tokens ganadores (1 USDC) automáticamente |
 
 ## Flujo
@@ -25,10 +25,20 @@
 
 Tiempos en cada `LiveTrade` (reloj de Binance): `signalTime` (segundo en que decidió el motor), `sentAt`, `respondedAt`, `latencyMs` (ida y vuelta de `POST /order`) y `signMs` (firma).
 
+## Latencia real (27 nov, Railway Amsterdam)
+Primeras 4 compras con límite ±2¢: todas `rejected` con "no orders found to match with FAK order". Se comprobó con los trades del market (Data API v2) que el precio subió 4–9¢ en menos de 1 s: otros compradores se llevaron a los vendedores baratos antes de que llegara nuestra orden. Por eso se quitó el límite.
+
+| Tramo | Tiempo |
+|---|---|
+| Señal (segundo T) → orden enviada | ~152 ms (motor C decide en T + 150 ms; firma 2–5 ms) |
+| `POST /order` ida y vuelta | 255–1707 ms (orden de prueba con firma de ceros: ~40 ms) |
+
+**Retención de Polymarket (*taker delay*):** los markets cripto Up/Down retienen cada orden que casa al instante. Durante la retención la orden queda pendiente, no se puede cancelar, y luego se valida otra vez y se ejecuta. En BTC 5 min está activa: `GET /clob-markets/<conditionId>` → `itode: true`. La documentación dice 250 ms; según fuentes externas pasó a 50 ms y luego a 150 ms. Es el suelo de cualquier orden que compra o vende al instante, y no se puede evitar desde nuestro lado. El resto de la variación (hasta ~1,4 s) también es de Polymarket.
+
 ## Seguridad
 - **Sin clave o sin contraseña: desactivado.** Si la clave no es la de `PM_SIGNER_ADDRESS`, también queda desactivado. `/ws/trading` informa el motivo.
 - **Interruptor protegido:** `POST /api/trading/arm` exige la cabecera `x-trading-password`, comparada en tiempo constante. Una contraseña incorrecta tarda 800 ms y se registra. La web la guarda en `localStorage` de ese navegador.
-- **Topes duros:** 10 USDC por orden y 40 USDC por market. Solo el motor C, solo el market en curso.
+- **Topes duros:** 10 USDC por orden y 40 USDC por market. Solo el motor C, solo el market en curso. Sin límite de precio, una compra puede ejecutarse muy por encima de la señal: el importe nunca supera esos topes.
 - **La sonda de latencia no cambia:** sigue firmada con ceros (`PROBE_SIGNATURE`, [latency](latency.md)). La clave solo la usa `LiveTrader`.
 - **Secretos:** `PM_WALLET_PRIVATE_KEY` y `TRADING_PASSWORD` solo en `apps/server/.env.local` y en las variables de Railway.
 

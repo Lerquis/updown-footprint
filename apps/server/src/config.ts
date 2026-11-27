@@ -102,8 +102,8 @@ export const config = {
     minUsd: num(process.env.PM_LIVE_MIN_USD, 1),
     maxUsd: num(process.env.PM_LIVE_MAX_USD, 10),
     maxMarketUsd: num(process.env.PM_LIVE_MAX_MARKET_USD, 40),
-    /** peor precio aceptado frente a la senal (0.02 = 2c) */
-    slippage: num(process.env.PM_LIVE_SLIPPAGE, 0.02),
+    /** peor precio aceptado frente a la senal (0.02 = 2c). Por defecto SIN LIMITE (1 -> compra hasta 0.99, vende desde 0.01) */
+    slippage: num(process.env.PM_LIVE_SLIPPAGE, 1),
     tick: 0.01,
     minShares: 5,
   },

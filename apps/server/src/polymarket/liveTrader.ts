@@ -14,7 +14,7 @@ import { l2Headers, responseDetail, type ClobCreds } from "./latency.js";
  *  - el interruptor esta activado para el market en curso (se apaga solo al cambiar de market),
  *  - la senal es del motor C y de ese mismo market.
  * Importe = paper x `scale` (1/5) entre `minUsd` y `maxUsd`, con tope `maxMarketUsd` por market. Orden FAK con precio
- * limite senal ± `slippage`: Polymarket nunca ejecuta a peor precio. Firma local (OrderBuilder) y envio por la conexion
+ * limite senal ± `slippage` (por defecto sin limite: 0.99 / 0.01; el importe en USDC sigue acotado). Firma local (OrderBuilder) y envio por la conexion
  * HTTP/2 caliente. La sonda de latencia sigue aparte y sigue firmada con ceros (latency.ts).
  */
 
@@ -50,11 +50,12 @@ export function limitPriceFor(action: "buy" | "sell", signalPrice: number, slipp
 }
 
 /**
- * USDC reales de una compra: paper x scale, subido al minimo de Polymarket (>= minUsd y >= minShares tokens al precio limite,
- * para poder venderlos despues) y con tope maxUsd y lo que quede del tope por market. null si no cabe.
+ * USDC reales de una compra: paper x scale, subido al minimo de Polymarket (>= minUsd y >= minShares tokens al precio de la
+ * senal, para poder venderlos despues) y con tope maxUsd y lo que quede del tope por market. null si no cabe.
+ * Se usa el precio de la senal y no el limite: sin limite (0.99) el minimo seria siempre ~5 USDC.
  */
-export function realBuyUsd(paperUsd: number, limitPrice: number, c: Pick<LiveTraderConfig, "scale" | "minUsd" | "maxUsd" | "minShares">, remainingUsd: number): number | null {
-  const min = Math.max(c.minUsd, c.minShares * limitPrice);
+export function realBuyUsd(paperUsd: number, signalPrice: number, c: Pick<LiveTraderConfig, "scale" | "minUsd" | "maxUsd" | "minShares">, remainingUsd: number): number | null {
+  const min = Math.max(c.minUsd, c.minShares * signalPrice);
   const usd = Math.min(Math.max(paperUsd * c.scale, min), c.maxUsd, remainingUsd);
   return usd + 1e-9 < min ? null : round(usd, 2);
 }
@@ -265,7 +266,7 @@ export class LiveTrader extends EventEmitter<LiveTraderEvents> {
 
     let amount: number;
     if (s.action === "buy") {
-      const usd = realBuyUsd(s.amount, limitPrice, this.c, this.c.maxMarketUsd - this.spentUsd);
+      const usd = realBuyUsd(s.amount, s.price, this.c, this.c.maxMarketUsd - this.spentUsd);
       if (usd === null) return this.record({ ...base, detail: `fuera de limites (gastado ${round(this.spentUsd, 2)} de ${this.c.maxMarketUsd} USDC en el market)` });
       base.requestedUsd = usd;
       amount = usd;

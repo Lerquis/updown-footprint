@@ -106,7 +106,7 @@ export function LiveTradingCard({ tr, slug }: { tr: TradingView; slug: string })
       {st && (
         <p className="mt-2 text-[11px] text-muted-foreground">
           Sigue cada compra/venta del motor C con {st.limits.scale === 0.2 ? "paper ÷ 5" : `paper × ${st.limits.scale}`} ({st.limits.minUsd}–{st.limits.maxUsd} USDC, mínimo 5
-          tokens), máximo {st.limits.maxMarketUsd} USDC por market, orden FAK con límite señal ±{Math.round(st.limits.slippage * 100)}¢. Se apaga solo al terminar el
+          tokens), máximo {st.limits.maxMarketUsd} USDC por market, orden FAK {st.limits.slippage >= 0.98 ? "sin límite de precio" : `con límite señal ±${Math.round(st.limits.slippage * 100)}¢`}. Se apaga solo al terminar el
           market. No se guarda.
           {armed && (
             <>

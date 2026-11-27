@@ -24,9 +24,14 @@ test("realBuyUsd: paper / 5 entre 1 y 10 USDC", () => {
   assert.equal(realBuyUsd(80, 0.1, SIZE, 40), 10);
 });
 
-test("realBuyUsd: se sube al minimo de Polymarket (5 tokens al precio limite) para poder venderlo", () => {
+test("realBuyUsd: se sube al minimo de Polymarket (5 tokens al precio de la senal) para poder venderlo", () => {
   // paper 5 -> 1 USDC, pero 5 tokens a 0.62 = 3.10 USDC
   assert.equal(realBuyUsd(5, 0.62, SIZE, 40), 3.1);
+});
+
+test("limitPriceFor sin limite (tolerancia 1): compra hasta 0.99, vende desde 0.01", () => {
+  assert.equal(limitPriceFor("buy", 0.46, 1, 0.01), 0.99);
+  assert.equal(limitPriceFor("sell", 0.7, 1, 0.01), 0.01);
 });
 
 test("realBuyUsd: respeta el tope por market y devuelve null si no llega al minimo", () => {
