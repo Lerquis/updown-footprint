@@ -9,6 +9,7 @@ interface RawDepthDiff {
   E: number; // event time (reloj de Binance)
   U: number; // first update id
   u: number; // final update id
+  pu?: number; // futures: final update id del diff anterior
   b: [string, string][];
   a: [string, string][];
 }
@@ -19,6 +20,24 @@ interface RawSnapshot {
   asks: [string, string][];
 }
 
+/** Reglas de sincronizacion del libro: spot (`/api/v3`) o futuros USDⓈ-M (`/fapi/v1`), que encadenan los diffs con `pu`. */
+export type DepthMode = "spot" | "futures";
+
+/** ¿El diff ya esta contenido en el snapshot (se descarta)? spot: u <= lastUpdateId · futures: u < lastUpdateId */
+export function isStaleDiff(mode: DepthMode, d: Pick<RawDepthDiff, "u">, lastUpdateId: number): boolean {
+  return mode === "spot" ? d.u <= lastUpdateId : d.u < lastUpdateId;
+}
+
+/**
+ * ¿Se puede aplicar el diff? (funcion pura; false => hay hueco y hay que resincronizar)
+ *  - primero tras el snapshot: spot U <= lastUpdateId + 1 <= u · futures U <= lastUpdateId <= u
+ *  - siguientes: spot U == u anterior + 1 · futures pu == u anterior
+ */
+export function bridgesDiff(mode: DepthMode, d: Pick<RawDepthDiff, "U" | "u" | "pu">, prevU: number, lastUpdateId: number): boolean {
+  if (prevU === 0) return mode === "spot" ? d.U <= lastUpdateId + 1 && d.u >= lastUpdateId + 1 : d.U <= lastUpdateId && d.u >= lastUpdateId;
+  return mode === "spot" ? d.U === prevU + 1 : d.pu === prevU;
+}
+
 export interface DepthClientEvents {
   state: [UpstreamState];
 }
@@ -26,7 +45,7 @@ export interface DepthClientEvents {
 /**
  * Mantiene un OrderBook local sincronizado con Binance siguiendo el procedimiento oficial:
  * 1) abrir stream de diffs y bufferizar, 2) pedir snapshot REST, 3) descartar diffs viejos,
- * 4) aplicar en orden verificando continuidad (U == prev.u + 1); si hay hueco => resync.
+ * 4) aplicar en orden verificando continuidad (`bridgesDiff`: spot U == prev.u + 1, futuros pu == prev.u); si hay hueco => resync.
  */
 export class DepthClient extends EventEmitter<DepthClientEvents> {
   private ws?: WebSocket;
@@ -46,6 +65,9 @@ export class DepthClient extends EventEmitter<DepthClientEvents> {
     private readonly symbol: string,
     private readonly book: OrderBook,
     private readonly snapshotLimit: number,
+    private readonly mode: DepthMode = "spot",
+    /** prefijo de los logs (p. ej. "futures:depth") */
+    private readonly tag = "depth",
   ) {
     super();
   }
@@ -76,7 +98,7 @@ export class DepthClient extends EventEmitter<DepthClientEvents> {
     this.ws = ws;
 
     ws.on("open", () => {
-      console.log(`[depth] connected ${url}`);
+      console.log(`[${this.tag}] connected ${url}`);
       void this.loadSnapshot(ws);
     });
     ws.on("message", (data) => {
@@ -90,7 +112,7 @@ export class DepthClient extends EventEmitter<DepthClientEvents> {
       if (!this.synced) this.buffered.push(m);
       else this.applyDiff(m, ws);
     });
-    ws.on("error", (err) => console.error("[depth] error", err.message));
+    ws.on("error", (err) => console.error(`[${this.tag}] error`, err.message));
     ws.on("close", () => {
       if (this.stopped || ws !== this.ws) return;
       this.scheduleReconnect();
@@ -101,7 +123,7 @@ export class DepthClient extends EventEmitter<DepthClientEvents> {
     this.synced = false;
     const delay = Math.min(30_000, 1000 * 2 ** this.attempt++);
     this.setState("reconnecting");
-    console.warn(`[depth] closed, retry in ${delay}ms`);
+    console.warn(`[${this.tag}] closed, retry in ${delay}ms`);
     this.timer = setTimeout(() => this.connect(), delay);
   }
 
@@ -113,7 +135,7 @@ export class DepthClient extends EventEmitter<DepthClientEvents> {
       if (ws !== this.ws) return; // se reconecto mientras tanto
 
       this.book.reset(snap.lastUpdateId, snap);
-      const pending = this.buffered.filter((d) => d.u > snap.lastUpdateId);
+      const pending = this.buffered.filter((d) => !isStaleDiff(this.mode, d, snap.lastUpdateId));
       this.buffered = [];
       this.prevU = 0;
       this.synced = true;
@@ -124,25 +146,17 @@ export class DepthClient extends EventEmitter<DepthClientEvents> {
       if (this.synced) {
         this.attempt = 0;
         this.setState("connected");
-        console.log(`[depth] book synced (lastUpdateId ${snap.lastUpdateId})`);
+        console.log(`[${this.tag}] book synced (lastUpdateId ${snap.lastUpdateId})`);
       }
     } catch (err) {
-      console.error("[depth] snapshot failed", (err as Error).message);
+      console.error(`[${this.tag}] snapshot failed`, (err as Error).message);
       ws.terminate();
     }
   }
 
   private applyDiff(d: RawDepthDiff, ws: WebSocket) {
-    if (this.prevU === 0) {
-      // primer diff tras el snapshot: debe cubrir lastUpdateId + 1
-      if (!(d.U <= this.book.lastUpdateId + 1 && d.u >= this.book.lastUpdateId + 1)) {
-        console.warn("[depth] first diff does not bridge snapshot, resync");
-        this.synced = false;
-        ws.terminate();
-        return;
-      }
-    } else if (d.U !== this.prevU + 1) {
-      console.warn("[depth] gap in diffs, resync");
+    if (!bridgesDiff(this.mode, d, this.prevU, this.book.lastUpdateId)) {
+      console.warn(`[${this.tag}] ${this.prevU === 0 ? "first diff does not bridge snapshot" : "gap in diffs"}, resync`);
       this.synced = false;
       ws.terminate();
       return;

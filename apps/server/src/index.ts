@@ -1,275 +1,33 @@
 import { createServer } from "node:http";
 import { WebSocketServer } from "ws";
-import {
-  CHANNELS,
-  type AggTrade,
-  type AggTradesServerMessage,
-  type AnalysisServerMessage,
-  type DepthServerMessage,
-  type EnginesServerMessage,
-  type LatencyServerMessage,
-  type MakerProbeRequest,
-  type TradingArmRequest,
-  type TradingServerMessage,
-  type OrderflowServerMessage,
-  type PmDecision,
-  type PmEngineId,
-  type PmEngineInfo,
-  type PmEngineThresholds,
-  type PmMarketsResponse,
-  type PolymarketServerMessage,
-  type UpstreamState,
-} from "@updown/protocol";
-import { createReadStream, existsSync, statSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { sourcePath, type CompareMarketRow, type CompareResponse, type MarketSource } from "@updown/protocol";
+import { createReadStream, existsSync } from "node:fs";
+import { join } from "node:path";
 import { config } from "./config.js";
-import { AggTradeClient } from "./binance/aggTradeClient.js";
-import { backfillTrades } from "./binance/backfill.js";
-import { DepthClient } from "./binance/depthClient.js";
-import { OrderflowEngine } from "./analysis/engine.js";
-import { DEFAULT_DETECTOR } from "./analysis/detectors.js";
-import { AnalysisMonitor, DEFAULT_MONITOR } from "./analysis/monitor.js";
-import { TradeBuffer } from "./store/tradeBuffer.js";
-import { OrderBook } from "./store/orderBook.js";
-import { DepthHistory } from "./store/depthHistory.js";
-import { Channel } from "./ws/channel.js";
-import { ExchangeClock } from "./clock.js";
-import { HttpPolymarketApi } from "./polymarket/api.js";
-import { BookClient } from "./polymarket/bookClient.js";
 import { ChainlinkClient } from "./polymarket/chainlinkClient.js";
 import { ChainlinkTwapClient } from "./polymarket/chainlinkTwapClient.js";
-import { PolymarketTracker } from "./polymarket/tracker.js";
-import { ENGINE_VERSION, MarketStore } from "./polymarket/store.js";
-import { serverFast, serverStrategy } from "./polymarket/serverStrategy.js";
-import { FastRunner, scheduleFast } from "./polymarket/fastRunner.js";
-import { DbBackup } from "./backup/backup.js";
-import { PmFeed, scheduleEngine, TimedEngine } from "./polymarket/timedEngine.js";
-import { slotStart } from "./polymarket/tracker.js";
 import { LatencyMonitor } from "./polymarket/latency.js";
-import { LiveTrader } from "./polymarket/liveTrader.js";
-import { MakerProbe } from "./polymarket/makerProbe.js";
+import { compareMarkets, compareTotals } from "./polymarket/compare.js";
+import { serverFast } from "./polymarket/serverStrategy.js";
+import { createSource, splitSource, type Source } from "./source.js";
 
-const SYMBOL = config.symbol.toUpperCase();
+/**
+ * Composicion (ADR 0016): lo compartido (Chainlink, latencia al CLOB) + una fuente completa por mercado de Binance
+ * (spot siempre; futures si FUTURES_ENABLED). Cada fuente tiene sus canales (`/ws/...` y `/ws/futures/...`), su API, su base,
+ * sus backups y sus compras reales. Aqui solo se enruta.
+ */
 
-// ── Estado y motores ──
-const buffer = new TradeBuffer(config.retentionMs, config.tradesMax);
-const upstream = new AggTradeClient(config.binanceWsUrl, config.symbol);
-
-const book = new OrderBook();
-const depthHistory = new DepthHistory(config.depthHistory);
-const depthClient = new DepthClient(config.binanceWsUrl, config.binanceRestUrl, config.symbol, book, config.depthSnapshotLimit);
-
-const engine = new OrderflowEngine({
-  barMs: config.barMs,
-  barHistory: config.barHistory,
-  tick: config.footprintTick,
-  retentionMs: config.retentionMs,
-  detector: {
-    ...DEFAULT_DETECTOR,
-    tick: config.footprintTick,
-    barMs: config.barMs,
-    imbalanceRatio: config.imbalanceRatio,
-    imbalanceMinVol: config.imbalanceMinVol,
-    imbalanceMinStack: config.imbalanceMinStack,
-  },
-});
-const monitor = new AnalysisMonitor(engine, {
-  ...DEFAULT_MONITOR,
-  lookbackMs: config.analysisLookbackMs,
-  recentBars: config.analysisRecentBars,
-  barMs: config.barMs,
-});
-
-const clock = new ExchangeClock();
+// ── Compartido ──
 // Precio de referencia: TWAP de Chainlink (PolyBolt, necesita credenciales CLOB) o, si faltan, el spot del RTDS antiguo.
 const hasClob = Boolean(config.pmClob.apiKey && config.pmClob.secret && config.pmClob.passphrase);
-const chainlink: ChainlinkClient | ChainlinkTwapClient = hasClob
-  ? new ChainlinkTwapClient(config.pmTwapWsUrl, config.pmClob)
-  : new ChainlinkClient(config.pmLiveWsUrl);
+const chainlink: ChainlinkClient | ChainlinkTwapClient = hasClob ? new ChainlinkTwapClient(config.pmTwapWsUrl, config.pmClob) : new ChainlinkClient(config.pmLiveWsUrl);
 console.log(`[polymarket] price feed: ${hasClob ? "Chainlink TWAP 60s (PolyBolt)" : "Chainlink spot (RTDS, sin credenciales)"}`);
-// Backups a S3/R2 (solo si hay bucket configurado). Con PM_DB_RESTORE y sin base local, se descarga la ultima copia antes de abrirla.
-const bk = config.backup;
-const dbBackup = bk.s3.bucket && bk.s3.endpoint && bk.s3.accessKeyId && bk.s3.secretAccessKey ? new DbBackup(bk, config.pmDbPath) : null;
-if (dbBackup && bk.restore) await dbBackup.restoreIfMissing();
-const marketStore = new MarketStore(config.pmDbPath, SYMBOL);
-/** true si la carpeta de la base es otro sistema de archivos que la raiz (un volumen montado); en Railway debe serlo */
-const dbOnVolume = (() => {
-  try {
-    return statSync(dirname(config.pmDbPath)).dev !== statSync("/").dev;
-  } catch {
-    return false;
-  }
-})();
-if (process.env.RAILWAY_ENVIRONMENT && !dbOnVolume)
-  console.error(`[db] !!! ${dirname(config.pmDbPath)} NO es un volumen: la base se borrara en el proximo deploy. Solo quedaran los backups de R2.`);
-const dbInfo = () => {
-  let sizeMb: number | null = null;
-  try {
-    sizeMb = Math.round((statSync(config.pmDbPath).size / 1048576) * 10) / 10;
-  } catch {}
-  return {
-    path: config.pmDbPath,
-    sizeMb,
-    onVolume: dbOnVolume,
-    backup: dbBackup
-      ? {
-          enabled: bk.enabled,
-          intervalH: bk.intervalMs / 3600_000,
-          keepH: bk.keepHours,
-          last: dbBackup.lastBackup() ? new Date(dbBackup.lastBackup()).toISOString() : null,
-          running: dbBackup.running,
-          lastError: dbBackup.lastError,
-        }
-      : null,
-  };
-};
-if (dbBackup && bk.enabled) dbBackup.start();
-// La base de la generacion anterior (si existe) se sube una vez al archivo del bucket; nunca se borra ni se modifica
-if (dbBackup)
-  void dbBackup
-    .archiveOnce(config.pmLegacyDbPath, process.env.RAILWAY_ENVIRONMENT ? "railway" : "local")
-    .catch((e) => console.error(`[backup] no se pudo archivar la base anterior: ${e instanceof Error ? e.message : e}`));
-const strategy = serverStrategy();
 const fast = serverFast();
 if (fast.calibration) console.log(`[fast] deriva calibrada (${fast.calibration.createdAt}, ${fast.calibration.samples} muestras): ${fast.calibration.betas.join(", ")}`);
-/** Motores por segundo (A y C, mismas reglas). D y E van aparte (FastRunner). */
-const TIMED_IDS = ["a", "c"] as const;
-type TimedId = (typeof TIMED_IDS)[number];
-const ENGINE_IDS: PmEngineId[] = ["a", "c", "d", "e"];
-const timedThresholds: PmEngineThresholds = { minEdge: strategy.minEdge, exitMargin: strategy.exitMargin, maxSpread: strategy.maxSpread, warmupS: strategy.warmupS, noEntryS: strategy.noEntryS };
-const engineInfo: PmEngineInfo[] = [
-  ...TIMED_IDS.map((id) => ({ id, mode: id === "a" ? ("live" as const) : ("asOf" as const), delayMs: config.pmEngineDelayMs[id], kind: "taker" as const, thresholds: timedThresholds })),
-  {
-    id: "d",
-    mode: "fast",
-    delayMs: config.pmFast.tickMs,
-    kind: "taker",
-    thresholds: { minEdge: fast.predictive.minEdge, exitMargin: fast.predictive.exitMargin, maxSpread: fast.predictive.maxSpread, warmupS: fast.predictive.warmupS, noEntryS: fast.predictive.noEntryS },
-  },
-  {
-    id: "e",
-    mode: "fast",
-    delayMs: config.pmFast.tickMs,
-    kind: "maker",
-    thresholds: { minEdge: fast.maker.edge, exitMargin: fast.maker.exitEdge, maxSpread: 1, warmupS: fast.maker.warmupS, noEntryS: fast.maker.noEntryS },
-  },
-];
-/** Parametros con los que se genera cada market guardado (para reproducirlo) */
-const engineParams = {
-  strategy,
-  fast: { predictive: fast.predictive, maker: fast.maker, drift: fast.drift, paper: config.pmFast.paper, tickMs: config.pmFast.tickMs },
-  engines: engineInfo,
-  detector: { tick: config.footprintTick, barMs: config.barMs, imbalanceRatio: config.imbalanceRatio, imbalanceMinVol: config.imbalanceMinVol, imbalanceMinStack: config.imbalanceMinStack },
-  depth: { step: config.depthStep, rangePct: config.depthRangePct, intervalMs: config.depthIntervalMs },
-};
-const tracker = new PolymarketTracker(
-  new HttpPolymarketApi(config.pmGammaUrl, config.pmSiteUrl, config.pmSymbol, config.pmVariant, config.pmMarketMs, config.pmTwapSeconds),
-  { bars: () => engine.allBars(), cvd: () => engine.cvdPoints, signals: () => engine.signals },
-  (tokens) => new BookClient(config.pmBookWsUrl, tokens),
-  {
-    marketMs: config.pmMarketMs,
-    slugPrefix: config.pmSlugPrefix,
-    historyMax: config.pmHistory,
-    graceMs: 5000,
-    retryMs: 3000,
-    resolveTries: 200,
-    pointsMax: Math.ceil(config.pmMarketMs / 1000) + 60,
-  },
-);
-tracker.restore(marketStore.recent(config.pmHistory));
-// Motores A y C: mismas reglas; deciden cada segundo de Binance (+ su retraso). A con lo ultimo recibido, C "a fecha".
-const feed = new PmFeed();
-const decisionsMax = Math.ceil(config.pmMarketMs / 1000) + 10;
-const engines3 = Object.fromEntries(
-  TIMED_IDS.map((id) => [
-    id,
-    new TimedEngine({ id, mode: id === "a" ? "live" : "asOf", delayMs: config.pmEngineDelayMs[id], strategy, retentionMs: config.retentionMs, decisionsMax }, feed),
-  ]),
-) as Record<TimedId, TimedEngine>;
-// Motores D (predictivo, taker) y E (libro, maker): cada 100 ms con lo ultimo recibido (docs/features/predictive-engines.md)
-const fastRunner = new FastRunner(
-  {
-    tickMs: config.pmFast.tickMs,
-    retentionMs: config.retentionMs,
-    decisionsMax,
-    twapSeconds: config.pmTwapSeconds,
-    predictive: fast.predictive,
-    maker: fast.maker,
-    drift: fast.drift,
-    paper: config.pmFast.paper,
-  },
-  feed,
-  () => {
-    if (!book.ready) return null;
-    const { bids, asks } = book.sides();
-    return { bids, asks, mid: (book.bestBid() + book.bestAsk()) / 2 };
-  },
-);
-/** Registro de decisiones de un motor, sea por segundo (A, C) o rapido (D, E) */
-const engineTrack = (id: PmEngineId): { slug: string | null; decisions: PmDecision[] } =>
-  id === "d" || id === "e" ? { slug: fastRunner.slug, decisions: fastRunner.decisions[id].slice() } : { slug: engines3[id].slug, decisions: engines3[id].decisions.slice() };
-console.log(`[polymarket] db ${config.pmDbPath}: ${marketStore.count()} markets completos guardados, ${marketStore.counts().trades} aggTrades, ${tracker.history.length} cargados`);
 
-// ── Canales (uno por tipo de dato; cada uno envia snapshot al conectar) ──
-const aggTrades = new Channel<AggTradesServerMessage>(() => ({
-  type: "snapshot",
-  symbol: SYMBOL,
-  retentionMs: config.retentionMs,
-  trades: buffer.snapshot(),
-  upstream: upstream.state,
-}));
-const depth = new Channel<DepthServerMessage>(() => ({
-  type: "snapshot",
-  symbol: SYMBOL,
-  step: config.depthStep,
-  retentionMs: config.retentionMs,
-  columns: depthHistory.snapshot(),
-  upstream: depthClient.state,
-}));
-const orderflow = new Channel<OrderflowServerMessage>(() => ({
-  type: "snapshot",
-  symbol: SYMBOL,
-  tick: config.footprintTick,
-  barMs: config.barMs,
-  retentionMs: config.retentionMs,
-  bars: engine.allBars(),
-  cvd: engine.cvdPoints.slice(),
-  signals: engine.signals.slice(),
-  upstream: upstream.state,
-}));
-const analysis = new Channel<AnalysisServerMessage>(() => ({
-  type: "snapshot",
-  summary: monitor.last,
-  history: monitor.history.slice(),
-  upstream: upstream.state,
-}));
-
-/** Estado de Polymarket: conectado solo si lo estan el libro de tokens y el stream de Chainlink */
-const pmUpstream = (): UpstreamState => (tracker.upstream !== "connected" ? tracker.upstream : chainlink.state);
-const polymarket = new Channel<PolymarketServerMessage>(() => ({
-  type: "snapshot",
-  current: tracker.current,
-  next: tracker.next,
-  points: tracker.points.slice(),
-  trades: tracker.trades.slice(),
-  engines: {
-    c: { points: tracker.live("c").points.slice(), trades: tracker.live("c").trades.slice() },
-    d: { points: tracker.live("d").points.slice(), trades: tracker.live("d").trades.slice() },
-    e: { points: tracker.live("e").points.slice(), trades: tracker.live("e").trades.slice(), orders: (tracker.live("e").orders ?? []).slice() },
-  },
-  history: tracker.history.slice(),
-  historyMax: config.pmHistory,
-  upstream: pmUpstream(),
-}));
-
-const engines = new Channel<EnginesServerMessage>(() => ({
-  type: "snapshot",
-  thresholds: timedThresholds,
-  engines: engineInfo,
-  decisions: Object.fromEntries(ENGINE_IDS.map((id) => [id, engineTrack(id)])) as Record<PmEngineId, { slug: string | null; decisions: PmDecision[] }>,
-}));
-
-// Latencia hacia el CLOB de Polymarket cada 15 s (solo lectura: nunca opera). Libro del token Up del market en curso.
+// Latencia hacia el CLOB de Polymarket cada 15 s (solo lectura: nunca opera). Libro del token Up del market en curso (el de spot).
+let latencyToken: () => string | null = () => null;
+let latencyClock: () => number = () => Date.now();
 const latencyMonitor = new LatencyMonitor(
   {
     clobUrl: config.pmClobUrl,
@@ -278,307 +36,101 @@ const latencyMonitor = new LatencyMonitor(
     keepAliveMs: config.pmLatencyKeepAliveMs,
     historyMax: config.pmLatencyHistory,
   },
-  () => tracker.current?.upToken ?? tracker.next?.upToken ?? null,
-  () => clock.now(),
+  () => latencyToken(),
+  () => latencyClock(),
 );
 if (!latencyMonitor.authReady) console.log("[latency] sin PM_SIGNER_ADDRESS o credenciales CLOB: la medida autenticada respondera 401 (la latencia del gateway sigue siendo valida)");
 
-// Compras reales siguiendo al motor A, C o D: solo con el interruptor de la web activado y solo en el market en curso
-const liveTrader = new LiveTrader(
+// ── Fuentes ──
+const bk = config.backup;
+const backupFor = (prefix: string) => ({ ...bk, prefix });
+const shared = { chainlink, latencyMonitor };
+const spot = await createSource(
   {
-    clobUrl: config.pmClobUrl,
-    creds: { ...config.pmClob, address: config.pmSignerAddress, funder: config.pmFunderAddress },
-    ...config.live,
+    id: "spot",
+    tradesWsUrl: config.binanceWsUrl,
+    depthWsUrl: config.binanceWsUrl,
+    restUrl: config.binanceRestUrl,
+    depthMode: "spot",
+    depthSnapshotLimit: config.depthSnapshotLimit,
+    backfillPageDelayMs: 60,
+    dbPath: config.pmDbPath,
+    legacyDbPath: config.pmLegacyDbPath,
+    backup: backupFor(bk.prefix),
   },
-  () => clock.now(),
+  shared,
 );
-console.log(`[live] compras reales: ${liveTrader.enabled ? "disponibles (interruptor apagado)" : `desactivadas (${liveTrader.disabledReason})`}`);
-const trading = new Channel<TradingServerMessage>(() => ({ type: "snapshot", state: liveTrader.state(), trades: liveTrader.trades.slice() }));
-liveTrader.on("state", (state) => trading.broadcast({ type: "state", state }));
-liveTrader.on("trade", (trade) => trading.broadcast({ type: "trade", trade }));
+const fc = config.futures;
+const futures = fc.enabled
+  ? await createSource(
+      {
+        id: "futures",
+        tradesWsUrl: fc.tradesWsUrl,
+        depthWsUrl: fc.depthWsUrl,
+        restUrl: fc.restUrl,
+        depthMode: "futures",
+        depthSnapshotLimit: fc.depthSnapshotLimit,
+        backfillPageDelayMs: fc.backfillPageDelayMs,
+        dbPath: fc.dbPath,
+        legacyDbPath: null,
+        backup: backupFor(fc.backupPrefix),
+      },
+      shared,
+    )
+  : null;
+if (!futures) console.log("[futures] desactivado (FUTURES_ENABLED=false)");
+const sources = new Map<MarketSource, Source>([["spot", spot], ...(futures ? ([["futures", futures]] as const) : [])]);
+latencyToken = () => spot.tracker.current?.upToken ?? spot.tracker.next?.upToken ?? null;
 
-// Check maker: ordenes maker reales (las del motor E) siguiendo al motor A, C o D, solo con el interruptor
-const makerProbe = new MakerProbe(config.makerProbe, {
-  trader: liveTrader,
-  quote: (token) => {
-    const b = fastRunner.books.has(token) ? fastRunner.books.get(token) : null;
-    const q = b && b.time > 0 ? { bid: b.bestBid(), ask: b.bestAsk() } : feed.quote(token, Infinity);
-    return { bid: q?.bid ?? null, ask: q?.ask ?? null };
-  },
-  levelSize: (token, side, price) => (fastRunner.books.has(token) ? fastRunner.books.get(token).sizeAt(side, price) : 0),
-  now: () => clock.now(),
-});
-const latency = new Channel<LatencyServerMessage>(() => ({
-  type: "snapshot",
-  intervalMs: config.pmLatencyIntervalMs,
-  target: new URL(config.pmClobUrl).host,
-  region: config.region,
-  transport: "h2",
-  authReady: latencyMonitor.authReady,
-  history: latencyMonitor.history.slice(),
-  historyMax: config.pmLatencyHistory,
-  upstream: latencyMonitor.state,
-  maker: { state: makerProbe.state(), history: makerProbe.history.slice() },
-}));
-latencyMonitor.on("sample", (sample) => latency.broadcast({ type: "sample", sample }));
-makerProbe.on("sample", (sample) => latency.broadcast({ type: "makerSample", sample }));
-makerProbe.on("state", (state) => latency.broadcast({ type: "makerState", state }));
-latencyMonitor.on("state", (upstream) => latency.broadcast({ type: "status", upstream }));
-
-// ── Tuberia de trades: relleno historico + vivo, sin duplicados ──
-let ready = false;
-let lastId = 0;
-const pending: AggTrade[] = [];
-
-const ingest = (t: AggTrade) => {
-  if (t.id <= lastId) return; // ya procesado (solape relleno/vivo)
-  lastId = t.id;
-  buffer.push(t);
-  marketStore.addTrade(t);
-  engine.ingest(t);
-  for (const id of TIMED_IDS) engines3[id].addTrade(t);
-  fastRunner.addTrade(t);
-  if (ready) aggTrades.broadcast({ type: "trade", trade: t });
-};
-
-upstream.on("trade", (t) => {
-  clock.observe(t.time); // solo trades en vivo: el relleno historico no sirve para calibrar
-  if (ready) ingest(t);
-  else pending.push(t);
-});
-upstream.on("state", (s) => {
-  const msg = { type: "status", upstream: s } as const;
-  aggTrades.broadcast(msg);
-  orderflow.broadcast(msg);
-  analysis.broadcast(msg);
-});
-depthClient.on("state", (s) => depth.broadcast({ type: "status", upstream: s }));
-
-chainlink.on("price", (p) => feed.onChainlink(p.time, p.value));
-// sin marca de tiempo de Polymarket, se usa la hora de llegada (reloj de Binance estimado)
-tracker.on("quote", (q) => feed.onQuote(q.token, q.bid, q.ask, q.time ?? clock.now()));
-// libro completo y trades de Polymarket -> motores D y E (y su papel)
-tracker.on("book", (b) => fastRunner.onBook(b.token, b.bids, b.asks, b.time ?? clock.now()));
-tracker.on("level", (l) => {
-  fastRunner.onLevel(l.token, l.side, l.price, l.size, l.time ?? clock.now(), clock.now());
-  makerProbe.onLevel(l.token, l.side, l.price, l.size);
-});
-tracker.on("trade", (t) => fastRunner.onTrade(t, clock.now()));
-for (const id of TIMED_IDS) {
-  engines3[id].on("step", (st) => {
-    tracker.addStep(id, st.slug, st.point, st.signals);
-    if (st.signals.length) {
-      liveTrader.onSignals(id, st.signals, tracker.current);
-      makerProbe.onSignals(id, st.signals, tracker.current);
+// ── Comparativa spot vs futures (GET /api/compare) ──
+/** filas ya calculadas de markets con el resultado de las dos fuentes (no cambian): no se vuelve a leer su JSON */
+const compareCache = new Map<string, CompareMarketRow>();
+function compare(limit: number): CompareResponse {
+  if (!futures) return { markets: [], totals: compareTotals([]), futuresEnabled: false };
+  const rows: CompareMarketRow[] = [];
+  for (const { slug } of futures.marketStore.list({ limit })) {
+    const cached = compareCache.get(slug);
+    if (cached) {
+      rows.push(cached);
+      continue;
     }
-    engines.broadcast({ type: "decision", engine: id, slug: st.slug, decision: st.decision });
-  });
-}
-fastRunner.on("step", (st) => {
-  tracker.addStep(st.engine, st.slug, st.point, []);
-  engines.broadcast({ type: "decision", engine: st.engine, slug: st.slug, decision: st.decision });
-});
-fastRunner.on("fills", (id, slug, signals) => tracker.addSignals(id, slug, signals));
-fastRunner.on("order", (slug, order) => tracker.addOrder(slug, order));
-// el motor D envia sus ordenes al decidir (no tras la ejecucion en papel): las compras reales las siguen si se elige D
-fastRunner.on("intent", (signals) => {
-  liveTrader.onSignals("d", signals, tracker.current);
-  makerProbe.onSignals("d", signals, tracker.current);
-});
-const pmStatus = () => polymarket.broadcast({ type: "status", upstream: pmUpstream() });
-tracker.on("status", pmStatus);
-chainlink.on("state", pmStatus);
-tracker.on("markets", (current, next) => {
-  liveTrader.onMarket(current);
-  makerProbe.onMarket(current);
-  if (ready) polymarket.broadcast({ type: "markets", current, next });
-});
-tracker.on("point", (engine, point) => ready && polymarket.broadcast({ type: "point", engine, point }));
-tracker.on("signal", (engine, signal) => ready && polymarket.broadcast({ type: "signal", engine, signal }));
-tracker.on("order", (order) => ready && polymarket.broadcast({ type: "order", engine: "e", order }));
-tracker.on("record", (record) => {
-  if (ready) polymarket.broadcast({ type: "record", record });
-  // solo se guardan markets resueltos y con los 5 minutos completos (se reintenta al llegar el resultado)
-  if (record.market.status === "closed" && record.complete && marketStore.save(record, { version: ENGINE_VERSION, params: engineParams })) {
-    console.log(`[polymarket] guardado ${record.market.slug} (${record.market.result}, pnl ${record.pnl.net})`);
-  } else if (record.market.status === "closed" && !record.complete) {
-    console.log(`[polymarket] ${record.market.slug} incompleto: no se guarda`);
+    const s = spot.marketStore.get(slug);
+    const f = futures.marketStore.get(slug);
+    if (!s || !f) continue;
+    const [row] = compareMarkets([s], [f]);
+    if (!row) continue;
+    rows.push(row);
+    if (s.pnl.net !== null && f.pnl.net !== null) compareCache.set(slug, row);
   }
-});
+  rows.sort((a, b) => b.start - a.start);
+  return { markets: rows, totals: compareTotals(rows), futuresEnabled: true };
+}
 
-engine.on("bar", (bar) => ready && orderflow.broadcast({ type: "bar", bar }));
-engine.on("cvd", (point) => ready && orderflow.broadcast({ type: "cvd", point }));
-engine.on("signal", (signal) => ready && orderflow.broadcast({ type: "signal", signal }));
-
-// ── Muestreos periodicos ──
-const depthSampler = setInterval(() => {
-  if (depthClient.state !== "connected" || !depthClient.lastEventTime) return;
-  const col = book.toColumn(config.depthStep, config.depthRangePct, depthClient.lastEventTime);
-  if (!col) return;
-  depthHistory.push(col);
-  marketStore.addDepth(col, config.depthStep);
-  depth.broadcast({ type: "column", column: col });
-}, config.depthIntervalMs);
-
-const flowSampler = setInterval(() => {
-  marketStore.flush();
-  if (!ready) return;
-  engine.tick();
-  const r = monitor.update();
-  if (!r) return;
-  analysis.broadcast({ type: "summary", summary: r.summary });
-  if (r.changed) analysis.broadcast({ type: "change", summary: r.summary });
-}, 1000);
-
-// Cada motor da un paso por segundo de Binance, en el segundo + su retraso (igual en todos los servidores, no segun su reloj
-// interno). El tracker (rotacion del market, libro, archivo) se mueve justo antes del paso del motor A.
-const marketAt = (T: number) => {
-  const slot = slotStart(T, config.pmMarketMs);
-  return tracker.current?.start === slot ? tracker.current : tracker.next?.start === slot ? tracker.next : null;
-};
-const stopEngines = TIMED_IDS.map((id) =>
-  scheduleEngine(
-    engines3[id],
-    () => clock.now(),
-    (T) => {
-      if (id === "a") tracker.tick(T);
-      engines3[id].step(T, marketAt(T), engine.signals);
-      if (id === "a") {
-        const keep = new Set([tracker.current?.upToken ?? "", tracker.current?.downToken ?? "", tracker.next?.upToken ?? "", tracker.next?.downToken ?? ""]);
-        feed.prune(T - 60_000, keep);
-        fastRunner.books.prune(keep);
-      }
-    },
-    () => ready,
-  ),
-);
-stopEngines.push(scheduleFast(fastRunner, () => clock.now(), (t) => fastRunner.tick(t, marketAt(t)), () => ready));
-
-// ── HTTP + WS ──
+// ── HTTP ──
 const http = createServer((req, res) => {
-  if (req.url === "/health") {
+  const url = new URL(req.url ?? "/", "http://localhost");
+  const cors = { "access-control-allow-origin": config.allowedOrigin || "*" };
+  if (url.pathname === "/health") {
     res.writeHead(200, { "content-type": "application/json" });
     res.end(
       JSON.stringify({
         ok: true,
-        ready,
-        upstream: upstream.state,
-        memory: { trades: buffer.size, depthColumns: depthHistory.size, bars: engine.bars.length, cvdPoints: engine.cvdPoints.length, signals: engine.signals.length },
-        clients: { aggTrades: aggTrades.size, depth: depth.size, orderflow: orderflow.size, analysis: analysis.size, polymarket: polymarket.size, engines: engines.size, latency: latency.size, trading: trading.size },
-        polymarket: {
-          upstream: pmUpstream(),
-          chainlink: chainlink.state,
-          current: tracker.current?.slug ?? null,
-          history: tracker.history.length,
-          saved: marketStore.count(),
-          engines: Object.fromEntries(engineInfo.map((e) => [e.id, { market: engineTrack(e.id).slug, decisions: engineTrack(e.id).decisions.length, mode: e.mode, delayMs: e.delayMs }])),
-          openOrders: fastRunner.orders().filter((o) => o.status === "open" || o.status === "pending").length,
-        },
-        depth: { upstream: depthClient.state },
-        db: dbInfo(),
+        // spot en la raiz (como siempre); futures en su propia seccion
+        ...spot.health(),
+        futures: futures ? futures.health() : { enabled: false },
         latency: { region: config.region, authReady: latencyMonitor.authReady, reconnects: latencyMonitor.reconnects, last: latencyMonitor.history.at(-1) ?? null },
       }),
     );
     return;
   }
-  const url = new URL(req.url ?? "/", "http://localhost");
-  // Interruptor de compras reales (motor A, C o D, market en curso). Protegido con TRADING_PASSWORD (cabecera x-trading-password).
-  if (url.pathname === "/api/trading/arm") {
-    const cors = {
-      "access-control-allow-origin": config.allowedOrigin || "*",
-      "access-control-allow-methods": "POST, OPTIONS",
-      "access-control-allow-headers": "content-type, x-trading-password",
-    };
-    if (req.method === "OPTIONS") return void res.writeHead(204, cors).end();
-    if (req.method !== "POST") return void res.writeHead(405, cors).end();
-    let raw = "";
-    req.setEncoding("utf8");
-    req.on("data", (d: string) => {
-      raw += d;
-      if (raw.length > 4096) req.destroy();
-    });
-    req.on("end", () => {
-      const reply = (status: number, body: unknown) => {
-        res.writeHead(status, { ...cors, "content-type": "application/json" });
-        res.end(JSON.stringify(body));
-      };
-      const pass = req.headers["x-trading-password"];
-      if (!liveTrader.checkPassword(typeof pass === "string" ? pass : undefined)) {
-        console.warn("[live] contrasena incorrecta en /api/trading/arm");
-        // un poco de espera ante contrasenas incorrectas: frena los intentos a ciegas
-        return void setTimeout(() => reply(401, { error: "contrasena incorrecta" }), 800);
-      }
-      let body: TradingArmRequest;
-      try {
-        body = JSON.parse(raw) as TradingArmRequest;
-      } catch {
-        return reply(400, { error: "cuerpo invalido" });
-      }
-      const err = liveTrader.setArmed(String(body.slug ?? ""), body.armed === true, { engine: body.engine, sizing: body.sizing });
-      reply(err ? 409 : 200, err ? { error: err, state: liveTrader.state() } : { state: liveTrader.state() });
-    });
-    return;
-  }
-  // Check maker (ordenes maker reales siguiendo a un motor). Misma contrasena que las compras reales.
-  if (url.pathname === "/api/latency/maker") {
-    const cors = {
-      "access-control-allow-origin": config.allowedOrigin || "*",
-      "access-control-allow-methods": "POST, OPTIONS",
-      "access-control-allow-headers": "content-type, x-trading-password",
-    };
-    if (req.method === "OPTIONS") return void res.writeHead(204, cors).end();
-    if (req.method !== "POST") return void res.writeHead(405, cors).end();
-    let raw = "";
-    req.setEncoding("utf8");
-    req.on("data", (d: string) => {
-      raw += d;
-      if (raw.length > 1024) req.destroy();
-    });
-    req.on("end", () => {
-      const reply = (status: number, body: unknown) => {
-        res.writeHead(status, { ...cors, "content-type": "application/json" });
-        res.end(JSON.stringify(body));
-      };
-      const pass = req.headers["x-trading-password"];
-      if (!liveTrader.checkPassword(typeof pass === "string" ? pass : undefined)) {
-        console.warn("[maker-probe] contrasena incorrecta en /api/latency/maker");
-        return void setTimeout(() => reply(401, { error: "contrasena incorrecta" }), 800);
-      }
-      let body: MakerProbeRequest;
-      try {
-        body = JSON.parse(raw) as MakerProbeRequest;
-      } catch {
-        return reply(400, { error: "cuerpo invalido" });
-      }
-      const err = makerProbe.setEnabled(body.enabled === true, body.engine);
-      reply(err ? 409 : 200, err ? { error: err, state: makerProbe.state() } : { state: makerProbe.state() });
-    });
-    return;
-  }
-  if (url.pathname === "/api/markets" && req.method === "GET") {
-    // resumen de todos los markets guardados (sin points/barras): ?limit=&from=&to=&order=asc|desc
-    const q = url.searchParams;
-    const num = (k: string) => (q.has(k) && Number.isFinite(Number(q.get(k))) ? Number(q.get(k)) : undefined);
-    const body: PmMarketsResponse = {
-      total: marketStore.count(),
-      markets: marketStore.list({ from: num("from"), to: num("to"), limit: num("limit"), order: q.get("order") === "asc" ? "asc" : "desc" }),
-    };
-    res.writeHead(200, { "content-type": "application/json", "access-control-allow-origin": config.allowedOrigin || "*" });
-    res.end(JSON.stringify(body));
-    return;
-  }
-  const one = /^\/api\/markets\/([\w-]+)$/.exec(url.pathname);
-  if (one && req.method === "GET") {
-    // un market guardado completo (para abrirlo en el grafico)
-    const rec = marketStore.get(one[1]!);
-    if (!rec) return void res.writeHead(404, { "access-control-allow-origin": config.allowedOrigin || "*" }).end();
-    res.writeHead(200, { "content-type": "application/json", "access-control-allow-origin": config.allowedOrigin || "*" });
-    res.end(JSON.stringify(rec));
+  if (url.pathname === "/api/compare" && req.method === "GET") {
+    const limit = Math.min(500, Math.max(1, Number(url.searchParams.get("limit")) || 96));
+    res.writeHead(200, { ...cors, "content-type": "application/json" });
+    res.end(JSON.stringify(compare(limit)));
     return;
   }
   if (url.pathname === "/api/replays" && req.method === "GET") {
-    // informe de replays del motor A con ejecucion retrasada (lo genera `npm run replays`; ver docs/features/replays.md)
-    const cors = { "access-control-allow-origin": config.allowedOrigin || "*" };
+    // informe de replays del motor A con ejecucion retrasada (lo genera `npm run replays`; ver docs/features/replays.md). Solo spot.
     const file = join(config.replayDir, "report.json");
     if (!existsSync(file)) {
       res.writeHead(404, { ...cors, "content-type": "application/json" });
@@ -589,25 +141,21 @@ const http = createServer((req, res) => {
     createReadStream(file).pipe(res);
     return;
   }
+  const { source, path } = splitSource(url.pathname);
+  const src = sources.get(source);
+  if (src?.handleHttp(req, res, path, url)) return;
   res.writeHead(404).end();
 });
 
-// Un WebSocketServer por canal; el enrutado por path se hace en `upgrade`.
+// Un WebSocketServer por canal y fuente; el enrutado por path se hace en `upgrade`.
 // perMessageDeflate solo para mensajes grandes (snapshots); los deltas pequenos no se comprimen.
 const routes = new Map<string, WebSocketServer>();
-function mount<M>(path: string, channel: Channel<M>) {
-  const wss = new WebSocketServer({ noServer: true, perMessageDeflate: { threshold: 1024 } });
-  wss.on("connection", (ws) => channel.add(ws));
-  routes.set(path, wss);
-}
-mount(CHANNELS.aggTrades, aggTrades);
-mount(CHANNELS.depth, depth);
-mount(CHANNELS.orderflow, orderflow);
-mount(CHANNELS.analysis, analysis);
-mount(CHANNELS.polymarket, polymarket);
-mount(CHANNELS.engines, engines);
-mount(CHANNELS.latency, latency);
-mount(CHANNELS.trading, trading);
+for (const [id, src] of sources)
+  for (const [path, channel] of src.channels) {
+    const wss = new WebSocketServer({ noServer: true, perMessageDeflate: { threshold: 1024 } });
+    wss.on("connection", (ws) => channel.add(ws));
+    routes.set(sourcePath(id, path), wss);
+  }
 
 http.on("upgrade", (req, socket, head) => {
   const origin = req.headers.origin;
@@ -626,67 +174,34 @@ http.on("upgrade", (req, socket, head) => {
 
 http.listen(config.port, async () => {
   console.log(`[server] http/ws on :${config.port} (${[...routes.keys()].join(", ")}, /health)`);
-  upstream.start();
-  depthClient.start();
   chainlink.start();
   latencyMonitor.start();
-  liveTrader.onMarket(tracker.current);
-  makerProbe.onMarket(tracker.current);
-  liveTrader.start();
-
-  if (config.backfill) {
-    const t0 = Date.now();
-    const n = await backfillTrades(config.binanceRestUrl, config.symbol, Date.now() - config.retentionMs - 60_000, ingest);
-    console.log(`[backfill] ${n} trades in ${Date.now() - t0}ms; bars=${engine.bars.length} signals=${engine.signals.length}`);
-  }
-  pending.sort((a, b) => a.id - b.id).forEach(ingest);
-  pending.length = 0;
-  ready = true;
+  // las fuentes arrancan a la vez (el relleno de futures es mas lento por el rate limit y no debe retrasar a spot)
+  await Promise.all([...sources.values()].map((s) => s.start()));
   console.log("[server] ready");
 });
 
+// reloj de la latencia: el de spot (estimado con sus trades)
+latencyClock = () => spot.clock.now();
+
 let shuttingDown = false;
-/** un paso del apagado que no puede impedir los siguientes */
-const step = (name: string, fn: () => void) => {
-  try {
-    fn();
-  } catch (e) {
-    console.error(`[shutdown] ${name}: ${e instanceof Error ? e.message : e}`);
-  }
-};
 const shutdown = async (signal: string) => {
   if (shuttingDown) return;
   shuttingDown = true;
   console.log(`[shutdown] ${signal} recibido`);
-  // 1) backup final PRIMERO, con todo aun en marcha (VACUUM INTO da una copia consistente): nada de lo que se para despues puede impedirlo (ADR 0013)
-  if (dbBackup && bk.enabled) {
-    step("flush", () => marketStore.flush());
-    console.log("[backup] backup final antes de apagar…");
-    try {
-      const timeout = new Promise<"timeout">((r) => setTimeout(() => r("timeout"), bk.shutdownTimeoutMs));
-      const r = await Promise.race([dbBackup.run(), timeout]);
-      if (r === "timeout") console.error(`[backup] final sin terminar tras ${bk.shutdownTimeoutMs / 1000}s`);
-      else console.log(`[backup] final ok: ${r.key} (${r.markets} markets)`);
-    } catch (e) {
-      console.error(`[backup] final fallo: ${e instanceof Error ? e.message : e}`);
-    }
-  }
+  // 1) backups finales PRIMERO, con todo aun en marcha (ADR 0013); las dos bases a la vez
+  await Promise.all([...sources.values()].map((s) => s.finalBackup()));
   // 2) parar todo
-  step("timers", () => {
-    clearInterval(depthSampler);
-    clearInterval(flowSampler);
-  });
-  for (const stop of stopEngines) step("engine", stop);
-  step("binance", () => upstream.stop());
-  step("depth", () => depthClient.stop());
+  const step = (name: string, fn: () => void) => {
+    try {
+      fn();
+    } catch (e) {
+      console.error(`[shutdown] ${name}: ${e instanceof Error ? e.message : e}`);
+    }
+  };
   step("chainlink", () => chainlink.stop());
   step("latency", () => latencyMonitor.stop());
-  await makerProbe.stop().catch(() => undefined);
-  step("live", () => liveTrader.stop());
-  step("tracker", () => tracker.stop());
-  step("backup timer", () => dbBackup?.stop());
-  step("db flush", () => marketStore.flush());
-  step("db close", () => marketStore.close());
+  for (const s of sources.values()) await s.stop();
   console.log("[shutdown] listo");
   http.close(() => process.exit(0));
   // los WS abiertos mantienen vivo el servidor HTTP: la base ya esta cerrada, salir igualmente

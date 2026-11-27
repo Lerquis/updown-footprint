@@ -11,6 +11,13 @@ Fuente de verdad en código: `packages/protocol/src/index.ts`. Este doc es su de
 - Todo `snapshot` de datos históricos incluye `retentionMs` (la memoria del servidor): el cliente poda lo más viejo que `último − retentionMs`.
 - Cambios incompatibles: crear ADR y versionar la ruta (`/ws/v2/...`).
 
+## Fuentes spot y futures
+Cada canal y la API de markets/trading existen **una vez por fuente** (`MarketSource`: `spot` | `futures`, [ADR 0016](../decisions/0016-fuente-futures-en-paralelo.md)). Los mensajes son los mismos.
+- `sourcePath(source, path)`: spot usa la ruta tal cual (`/ws/orderflow`, `/api/markets`) y futures inserta la fuente (`/ws/futures/orderflow`, `/api/futures/markets`, `/api/futures/trading/arm`, `/api/futures/latency/maker`).
+- Cada fuente tiene sus motores, su base, sus compras reales y su check maker. `/ws/latency` repite en las dos las mismas muestras de latencia al CLOB, con el check maker de cada fuente.
+- `/health`, `/api/replays` (solo spot) y `/api/compare` no llevan fuente.
+- En futures, `PmPoint.binance` es el último precio del perpetuo y `basis` es Chainlink − media del perpetuo.
+
 ## Reloj
 Todos los timestamps (`AggTrade.time`, `DepthColumn.time`, `FootprintBar.start`, `CvdPoint.time`, …) están en el **reloj de Binance**. El navegador estima el desfase con el PC en `web/lib/exchangeClock.ts`; nunca usar `Date.now()` directo para posicionar datos en el eje de tiempo.
 
@@ -114,6 +121,11 @@ Compras/ventas reales que siguen al motor elegido (A, C o D), con el interruptor
 - `POST /api/trading/arm` con la cabecera `x-trading-password` y el cuerpo `TradingArmRequest` `{ slug, armed, engine?, sizing? }` → `{ state }` o `{ error, state? }`. Respuestas: 401 contraseña incorrecta · 409 no disponible o market que no está en curso.
 
 ## Otros endpoints
-- `GET /health` → `{ ok, ready, upstream, memory: {trades, depthColumns, bars, cvdPoints, signals}, clients: {…por canal}, depth: {upstream}, latency: {authReady, last}, polymarket: {upstream, chainlink, current, history, saved, engines: {a|c|d|e: {market, decisions, mode, delayMs}}, openOrders} }` (`openOrders`: órdenes en reposo del motor E). `ready` pasa a `true` cuando termina el relleno inicial.
+- `GET /health` → la fuente spot en la raíz, como siempre, y la de futures en `futures` (mismos campos, más `db` y `live`; `{ enabled: false }` si está desactivada). Spot en la raíz: `{ ok, ready, upstream, memory: {trades, depthColumns, bars, cvdPoints, signals}, clients: {…por canal}, depth: {upstream}, latency: {authReady, last}, polymarket: {upstream, chainlink, current, history, saved, engines: {a|c|d|e: {market, decisions, mode, delayMs}}, openOrders} }` (`openOrders`: órdenes en reposo del motor E). `ready` pasa a `true` cuando termina el relleno inicial.
 - `GET /api/markets` → `PmMarketsResponse`: `{ total, markets: PmMarketRow[] }` con una fila resumen por market guardado en la base de datos (lo justo para la tabla del historial: price to beat, cierre, cambio %, resultado, delta footprint, Δ CVD, señales alcistas/bajistas, Up inicio→fin, operaciones del motor, invertido/vendido/neto, `engineVersion`, `tradesOk`). No incluye `points`, barras ni CVD. Parámetros opcionales: `limit` (por defecto todos), `from` / `to` (filtran por inicio en ms; `to` exclusivo) y `order=asc|desc` (por defecto `desc`, más recientes primero). CORS abierto salvo que `ALLOWED_ORIGIN` esté definido. `GET /api/markets/<slug>` → el `PmRecord` completo de un market guardado (404 si no existe; ~100 KB). El resumen se calcula al guardar (columnas de `markets`), así que listar cientos de markets no lee el JSON.
+- `GET /api/compare?limit=` (por defecto 96, máximo 500) → `CompareResponse` `{ markets: CompareMarketRow[], totals: Record<PmEngineId, CompareEngineTotals>, futuresEnabled }`. Compara los markets guardados por las dos fuentes (emparejados por slug, de reciente a antiguo). Por motor, `CompareEngineMarket` trae:
+  - `spot` / `futures` (`PmEngineSummary`) y el lado de la primera entrada (`spotSide`, `futuresSide`);
+  - `leadMs`: primera entrada de spot − la de futures, solo si es el mismo lado. Positivo significa que futures entró antes;
+  - `priceDiff`: precio spot − precio futures. Positivo significa que futures compró más barato.
+  `CompareEngineTotals` suma el P&L, las operaciones y lo invertido, y cuenta `sameSide`, `futuresFirst`, `spotFirst`, `onlySpot`, `onlyFutures` y `oppositeSide`. Da también `avgLeadMs`, `medianLeadMs` y `avgPriceDiff`. Ver [futures-source](../features/futures-source.md).
 - `GET /api/replays` → `PmReplayReport`: replays del motor A con ejecución retrasada ([replays](../features/replays.md)). `delays` (s; 0 = referencia), `sources` (copias de R2 usadas) y `markets` (`PmReplayMarket`, antiguo → reciente: `slug`, `start`, `end`, `result`, `generation` v1/v2 y `runs`, un `PmReplayRun` por retraso con sus `fills` (`PmReplayFill`: hora y precio de la señal, hora y precio de la ejecución retrasada, tokens, USDC y `status` filled/missed/noPosition) y su `pnl`). Sirve el archivo que genera `npm run replays`; si no existe, 404 con `{ error }`. CORS como `/api/markets`.

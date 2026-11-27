@@ -32,6 +32,22 @@ export const CHANNELS = {
   trading: "/ws/trading",
 } as const;
 
+/**
+ * Mercado de Binance del que salen los datos (ADR 0016). Cada fuente tiene TODOS los canales y la API de markets/trading propios,
+ * con sus motores, su base de datos y sus compras reales; Polymarket (Chainlink, latencia al CLOB) es el mismo para las dos.
+ * spot: BTCUSDT spot (las rutas de siempre) · futures: perpetuo BTCUSDT USDⓈ-M (rutas con `/futures`).
+ */
+export type MarketSource = "spot" | "futures";
+export const SOURCES: readonly MarketSource[] = ["spot", "futures"];
+
+/**
+ * Ruta de un canal (`CHANNELS.x`) o de la API HTTP (`/api/...`) para una fuente.
+ * spot = la ruta tal cual · futures: `/ws/orderflow` -> `/ws/futures/orderflow`, `/api/markets` -> `/api/futures/markets`.
+ */
+export function sourcePath(source: MarketSource, path: string): string {
+  return source === "spot" ? path : path.replace(/^\/(ws|api)\//, `/$1/${source}/`);
+}
+
 // ───────────────────────── Canal aggTrades ─────────────────────────
 
 /** Mensajes servidor -> cliente del canal aggTrades. */
@@ -451,7 +467,7 @@ export interface PmPoint {
   upAsk: number | null;
   downBid: number | null;
   downAsk: number | null;
-  /** Ultimo precio de Binance (spot) de ese segundo */
+  /** Ultimo precio de Binance de ese segundo (de la fuente: spot o futures) */
   binance: number | null;
   /** Chainlink (TWAP) - media de 60 s de Binance: pasa el precio de Binance a las "unidades" con que resuelve Polymarket */
   basis: number | null;
@@ -593,6 +609,62 @@ export interface PmMarketsResponse {
   /** markets guardados en total (sin aplicar from/to/limit) */
   total: number;
   markets: PmMarketRow[];
+}
+
+/**
+ * Comparativa spot vs futures de un motor en un market guardado por las dos fuentes (`GET /api/compare`).
+ * Primera entrada = primera compra con `reason: "entry"`; `time` es el instante de la decision (reloj de Binance).
+ */
+export interface CompareEngineMarket {
+  spot: PmEngineSummary;
+  futures: PmEngineSummary;
+  /** lado de la primera entrada de cada fuente (null si no entro) */
+  spotSide: PmSide | null;
+  futuresSide: PmSide | null;
+  /** primera entrada de spot - primera entrada de futures, en ms, si las dos entraron por el MISMO lado: > 0 = futures antes */
+  leadMs: number | null;
+  /** precio de la primera entrada de spot - el de futures (mismo lado): > 0 = futures compro mas barato */
+  priceDiff: number | null;
+}
+
+export interface CompareMarketRow {
+  slug: string;
+  start: number;
+  result: "up" | "down";
+  engines: Record<PmEngineId, CompareEngineMarket>;
+}
+
+/** Totales de un motor sobre los markets comparados */
+export interface CompareEngineTotals {
+  /** markets guardados por las dos fuentes */
+  markets: number;
+  /** resultado de papel sumado (markets resueltos) e importe invertido */
+  spotNet: number;
+  futuresNet: number;
+  spotInvested: number;
+  futuresInvested: number;
+  spotTrades: number;
+  futuresTrades: number;
+  /** markets en que las dos entraron por el mismo lado, y en cuantos futures entro antes / despues */
+  sameSide: number;
+  futuresFirst: number;
+  spotFirst: number;
+  /** medias sobre los markets `sameSide` (null si no hay) */
+  avgLeadMs: number | null;
+  medianLeadMs: number | null;
+  avgPriceDiff: number | null;
+  /** entradas en un solo lado o en lados distintos */
+  onlySpot: number;
+  onlyFutures: number;
+  oppositeSide: number;
+}
+
+/** Respuesta de `GET /api/compare?limit=` */
+export interface CompareResponse {
+  markets: CompareMarketRow[];
+  totals: Record<PmEngineId, CompareEngineTotals>;
+  /** false si el servidor no tiene la fuente futures activada */
+  futuresEnabled: boolean;
 }
 
 /** Resultado de un motor en un market: sus muestras de 1 s ("fotos" con que decidio) y sus operaciones. */

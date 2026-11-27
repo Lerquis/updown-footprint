@@ -50,7 +50,7 @@ Para no empezar de cero, se sube la base local al bucket y Railway la descarga a
 | Variable | Valor |
 |---|---|
 | `PM_CLOB_API_KEY`, `PM_CLOB_SECRET`, `PM_CLOB_PASSPHRASE` | Las de `.env.local` (TWAP de Chainlink y latencia) |
-| `PM_WALLET_PRIVATE_KEY`, `TRADING_PASSWORD` | Compras reales del motor C ([live-trading](../features/live-trading.md)): clave privada de la EOA firmante y contraseña del interruptor. Sin ellas, desactivado |
+| `PM_WALLET_PRIVATE_KEY`, `TRADING_PASSWORD` | Compras reales del motor A, C o D, con un interruptor en cada fuente (spot y futures) ([live-trading](../features/live-trading.md)): clave privada de la EOA firmante y contraseña del interruptor. Sin ellas, desactivado |
 | `PM_SIGNER_ADDRESS`, `PM_FUNDER_ADDRESS` | Las de `.env.local`: signer y proxy wallet para la medida de latencia ([latency](../features/latency.md)). Sin ellas la orden de prueba responde 401 |
 | `ALLOWED_ORIGIN` | URL del frontend, p. ej. `https://updown.vercel.app` (vacío = cualquier origen) |
 | `BACKUP_S3_ENDPOINT` | `https://<account_id>.r2.cloudflarestorage.com` |
@@ -74,6 +74,10 @@ Para no empezar de cero, se sube la base local al bucket y Railway la descarga a
 - **Backup manual**: igual que el paso 2, o reducir `BACKUP_INTERVAL_H`. Cada backup ocupa en disco temporal (`/data/backup-tmp`) una copia sin comprimir + la comprimida: el volumen necesita ~2× el tamaño de la base libre.
 - **Restaurar en local** desde la nube: `npm run backup -w @updown/server -- restore` (solo si `data/polymarket-v2.db` no existe; con una clave concreta: `-- restore updown/v2/polymarket-<fecha>.db.gz`).
 - **Archivo de la generación anterior**: al arrancar, si existe la base sin sufijo (`polymarket.db`) y no tiene marca `.archived`, se sube **una vez** a `updown/archive/polymarket-<railway|local>-<fecha>.db.gz` (también a mano: `npm run backup -w @updown/server -- archive`). No se borra ni se modifica ([ADR 0011](../decisions/0011-tres-motores-guardados-y-base-v2.md)).
+- **Fuente futures** ([ADR 0016](../decisions/0016-fuente-futures-en-paralelo.md)):
+  - Su base `/data/polymarket-futures-v2.db` va en el mismo volumen, con backups propios en `updown-futures/v2/` y restauración automática igual que spot.
+  - `/health` → `futures.db` muestra su tamaño, si está en el volumen y su último backup.
+  - Futures guarda más aggTrades que spot: **el volumen se llena antes**. Al apagar, los dos backups finales van a la vez y necesitan espacio temporal para las dos copias.
 - **Desastre** (volumen borrado): crear volumen nuevo en `/data` con `PM_DB_RESTORE=true` → arranca desde la última copia.
 
 ## Variables de backup
@@ -81,7 +85,7 @@ Para no empezar de cero, se sube la base local al bucket y Railway la descarga a
 |---|---|---|
 | `BACKUP_S3_ENDPOINT` / `BACKUP_S3_BUCKET` / `BACKUP_S3_ACCESS_KEY_ID` / `BACKUP_S3_SECRET_ACCESS_KEY` | vacío | Bucket S3/R2. Si falta alguna, no hay backups ni restauración |
 | `BACKUP_S3_REGION` | `auto` | `auto` en R2; región real en S3/B2 |
-| `BACKUP_PREFIX` | `updown/` | Carpeta base: los backups van a `<prefijo>v2/` (generación de la base) y el archivo de bases anteriores a `<prefijo>archive/` |
+| `BACKUP_PREFIX` | `updown/` | Carpeta base: los backups van a `<prefijo>v2/` (generación de la base) y el archivo de bases anteriores a `<prefijo>archive/`. Los de futures van aparte, a `updown-futures/v2/` |
 | `BACKUP_INTERVAL_H` | `1` | Horas entre backups (se recuerda en `/data/<base>.last-backup`); además hay backup al apagar |
 | `BACKUP_KEEP_H` | `48` | Horas en que se conservan todas las copias; las anteriores se reducen a una por día |
 | `BACKUP_SHUTDOWN_TIMEOUT_S` | `150` | Máximo del backup final al apagar (menor que `drainingSeconds` 180) |

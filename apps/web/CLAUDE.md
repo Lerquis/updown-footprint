@@ -5,6 +5,7 @@ Next.js (App Router) + React 19 + TypeScript. Solo habla con nuestro servidor v�
 ## Estructura
 - `app/` — rutas y layout (Server Components por defecto).
 - `components/ui/` — shadcn/ui (generados, editables). `components/` — componentes de dominio; los que usan hooks llevan `"use client"`.
+- `lib/source.tsx` — fuente que se ve (spot/futures, ADR 0016): `SourceProvider`/`useSource`. `useWsChannel` y `useApiUrl` añaden la fuente a la ruta; los hooks NO la manejan. `SourceDashboard` (en `MarketDashboard.tsx`) remonta el panel al cambiarla. `/compare` (`CompareView`, `useCompare`): comparativa spot vs futures.
 - `lib/useWsChannel.ts` — conexión WS genérica con reconexión. `lib/use<Canal>.ts` — un hook por canal sobre `useWsChannel`: estado + datos.
 - `lib/chartView.ts` + `chartInteractions.ts` — vista (zoom/desplazamiento) **compartida** por los canvas de precio y CVD; vive fuera de React.
 - `lib/exchangeClock.ts` — reloj de Binance estimado; usarlo (no `Date.now()`) para posicionar datos en el eje de tiempo.
@@ -17,7 +18,7 @@ Next.js (App Router) + React 19 + TypeScript. Solo habla con nuestro servidor v�
 - `lib/useLatency.ts` + `components/LatencyPanel.tsx`: canal `/ws/latency` (latencia al CLOB medida por el servidor; reloj de la próxima medida con `exchangeClock`). `components/MakerProbeCard.tsx`: check maker, órdenes maker reales siguiendo a un motor (interruptor y motor con la contraseña de trading, `POST /api/latency/maker`).
 
 ## Convenciones
-- Tipos de mensajes SOLO desde `@updown/protocol`; rutas desde `CHANNELS`.
+- Tipos de mensajes SOLO desde `@updown/protocol`; rutas desde `CHANNELS`. Peticiones HTTP de una fuente con `useApiUrl()` (no `HTTP_BASE` directo).
 - Alias `@/` apunta a la raíz de `apps/web`.
 - Los mensajes de alta frecuencia se acumulan en un ref y se vuelcan a estado una vez por frame (`requestAnimationFrame`); limitar el tamaño de las listas.
 - Todo hook de canal expone el estado del enlace (`connecting|open|closed`) y el upstream, y la UI debe mostrarlo.

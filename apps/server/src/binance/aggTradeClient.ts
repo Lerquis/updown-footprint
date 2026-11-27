@@ -18,7 +18,11 @@ export interface AggTradeClientEvents {
   state: [UpstreamState];
 }
 
-/** Cliente upstream hacia Binance con reconexion exponencial. Emite `trade` y `state`. */
+/**
+ * Cliente upstream hacia Binance con reconexion exponencial. Emite `trade` y `state`.
+ * Vigilante: si la conexion esta abierta pero no llega ningun trade en `staleMs` (BTC opera varias veces por segundo), se
+ * avisa y se reconecta. Asi se detecto que Binance movio el aggTrade de futuros de /ws a /market/ws (conectaba sin enviar nada).
+ */
 export class AggTradeClient extends EventEmitter<AggTradeClientEvents> {
   private ws?: WebSocket;
   private attempt = 0;
@@ -29,6 +33,9 @@ export class AggTradeClient extends EventEmitter<AggTradeClientEvents> {
   constructor(
     private readonly baseUrl: string,
     private readonly symbol: string,
+    /** prefijo de los logs (p. ej. "futures:binance") */
+    private readonly tag = "binance",
+    private readonly staleMs = 30_000,
   ) {
     super();
   }
@@ -38,9 +45,13 @@ export class AggTradeClient extends EventEmitter<AggTradeClientEvents> {
     this.connect();
   }
 
+  private lastMsg = 0;
+  private watchdog?: NodeJS.Timeout;
+
   stop(): void {
     this.stopped = true;
     clearTimeout(this.timer);
+    clearInterval(this.watchdog);
     this.ws?.close();
   }
 
@@ -57,10 +68,19 @@ export class AggTradeClient extends EventEmitter<AggTradeClientEvents> {
 
     ws.on("open", () => {
       this.attempt = 0;
+      this.lastMsg = Date.now();
       this.setState("connected");
-      console.log(`[binance] connected ${url}`);
+      console.log(`[${this.tag}] connected ${url}`);
+      clearInterval(this.watchdog);
+      this.watchdog = setInterval(() => {
+        if (ws !== this.ws || Date.now() - this.lastMsg < this.staleMs) return;
+        console.warn(`[${this.tag}] sin trades en ${this.staleMs / 1000}s con la conexion abierta (${url}): reconectando`);
+        clearInterval(this.watchdog);
+        ws.terminate();
+      }, 5000);
     });
     ws.on("message", (data) => {
+      this.lastMsg = Date.now();
       try {
         const m = JSON.parse(data.toString()) as RawAggTrade;
         if (m.e !== "aggTrade") return;
@@ -73,15 +93,15 @@ export class AggTradeClient extends EventEmitter<AggTradeClientEvents> {
           isBuyerMaker: m.m,
         });
       } catch (err) {
-        console.error("[binance] bad message", err);
+        console.error(`[${this.tag}] bad message`, err);
       }
     });
-    ws.on("error", (err) => console.error("[binance] error", err.message));
+    ws.on("error", (err) => console.error(`[${this.tag}] error`, err.message));
     ws.on("close", () => {
       if (this.stopped) return;
       const delay = Math.min(30_000, 1000 * 2 ** this.attempt++);
       this.setState("reconnecting");
-      console.warn(`[binance] closed, retry in ${delay}ms`);
+      console.warn(`[${this.tag}] closed, retry in ${delay}ms`);
       this.timer = setTimeout(() => this.connect(), delay);
     });
   }

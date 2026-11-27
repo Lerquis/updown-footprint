@@ -1,5 +1,6 @@
 "use client";
 
+import { SOURCE_LABEL, useSource } from "@/lib/source";
 import { useEffect, useMemo, useState } from "react";
 import type { PmEngineId, PmMarketRow, PmOrder, PmPnl, PmRecord, PmSignal } from "@updown/protocol";
 import { Badge } from "@/components/ui/badge";
@@ -130,6 +131,7 @@ export function PolymarketPanel({ pm, flow }: { pm: PolymarketView; flow: Orderf
   const eng = useEngines(enginesOpen);
   // compras reales del motor A, C o D (canal /ws/trading)
   const tr = useTrading();
+  const source = useSource();
   const [now, setNow] = useState(() => exchangeClock.now());
   useEffect(() => {
     const id = setInterval(() => setNow(exchangeClock.now()), 500);
@@ -224,7 +226,7 @@ export function PolymarketPanel({ pm, flow }: { pm: PolymarketView; flow: Orderf
   return (
     <Card className="gap-0 py-0">
       <CardHeader className="border-b py-3">
-        <CardTitle>Polymarket · BTC Up or Down 5m</CardTitle>
+        <CardTitle>Polymarket · BTC Up or Down 5m · motores con Binance {SOURCE_LABEL[source]}</CardTitle>
         <CardDescription>
           Market en curso y todos los markets guardados en la base de datos ({mk.total}). Selecciona uno para ver el precio de los
           tokens Up/Down con las señales de Binance marcadas, y el CVD y delta de esos 5 minutos.

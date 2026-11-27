@@ -3,7 +3,8 @@
 Node (ESM) + TypeScript + `ws`. Corre con `tsx` (dev y prod) porque `@updown/protocol` se consume como TS fuente.
 
 ## Estructura
-- `src/index.ts` — composición: HTTP (`/health`), enrutado de `upgrade` por path, wiring upstream → buffer → canal.
+- `src/index.ts` — composición: lo compartido (Chainlink, `LatencyMonitor`), una fuente por mercado (spot + futures, ADR 0016), HTTP (`/health`, `/api/compare`, `/api/replays`, la API de cada fuente vía `splitSource`) y enrutado de `upgrade` por path (`sourcePath`).
+- `src/source.ts` — `createSource()`: TODO lo que depende de Binance (clientes, `ingest`, orderflow, motores, tracker, base, backups, `LiveTrader`, `MakerProbe`, canales, API de markets/trading). Nada que dependa de la fuente va en `index.ts`. `polymarket/compare.ts`: comparativa spot vs futures (pura, `compare.test.ts`).
 - `src/config.ts` — única lectura de `process.env`.
 - `src/binance/` — clientes upstream (uno por stream). Reconexión exponencial; emiten eventos tipados normalizados.
 - `src/store/` — estado en memoria (ring buffers, `OrderBook`).
@@ -18,8 +19,8 @@ Node (ESM) + TypeScript + `ws`. Corre con `tsx` (dev y prod) porque `@updown/pro
 - Imports relativos con extensión `.js` (ESM).
 - Libro de órdenes: solo `DepthClient` lo escribe (ver ADR 0004). Los timestamps salen del reloj de Binance, no de `Date.now()`.
 - Flujo fijo: `binance client → store.push → channel.broadcast`. Los canales no conocen a Binance.
-- Un canal por tipo de dato: `new Channel<Msg>(snapshotFn)` y `mount(CHANNELS.x, canal)` en `index.ts` (ruta desde `CHANNELS` del protocolo; un `WebSocketServer` con `noServer` por ruta).
-- Los trades entran por una sola tubería (`ingest` en `index.ts`): relleno REST + vivo, deduplicados por id. Nada consume trades por su cuenta.
+- Un canal por tipo de dato y fuente: `new Channel<Msg>(snapshotFn)` en el mapa `channels` de `source.ts`; `index.ts` lo monta en `sourcePath(fuente, CHANNELS.x)` (ruta desde `CHANNELS` del protocolo; un `WebSocketServer` con `noServer` por ruta).
+- Los trades entran por una sola tubería por fuente (`ingest` en `source.ts`): relleno REST + vivo, deduplicados por id. Nada consume trades por su cuenta.
 - Lógica de análisis = funciones puras con umbrales en `DetectorConfig`; todo cambio lleva prueba (`npm run test -w @updown/server`).
 - La memoria se mide en **tiempo** (`RETENTION_MS`), no en número de elementos.
 - Al conectar un cliente: enviar `snapshot` y luego deltas. Nunca consumir upstream por cliente.

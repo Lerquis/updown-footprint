@@ -18,4 +18,4 @@
 Ver [protocol.md](../architecture/protocol.md#canal-wsaggtrades). Sin cambios.
 
 ## Pendiente / ideas
-- Selector de símbolo, footprint por velas, persistencia, futuros USDT-M (`BINANCE_WS_URL`).
+- Selector de símbolo, footprint por velas, persistencia. (Futuros USDT-M ya va en paralelo: [futures-source](futures-source.md).)

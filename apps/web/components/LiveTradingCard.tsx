@@ -1,5 +1,6 @@
 "use client";
 
+import { SOURCE_LABEL, useSource } from "@/lib/source";
 import { useState } from "react";
 import type { LiveEngine, LiveSizing, LiveTrade } from "@updown/protocol";
 import { Badge } from "@/components/ui/badge";
@@ -27,6 +28,7 @@ const STATUS: Record<LiveTrade["status"], { label: string; cls: string }> = {
  * señal vs. ejecución (precio y tiempo). Datos en memoria del servidor, no se guardan.
  */
 export function LiveTradingCard({ tr, slug }: { tr: TradingView; slug: string }) {
+  const source = useSource();
   const [pass, setPass] = useState("");
   const [askPass, setAskPass] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -70,7 +72,7 @@ export function LiveTradingCard({ tr, slug }: { tr: TradingView; slug: string })
         <div className="flex items-center gap-2">
           <Switch id="live" checked={armed} disabled={busy || !st?.enabled || (!armed && !isCurrent)} onCheckedChange={(v) => void toggle(v)} />
           <Label htmlFor="live" className="font-semibold">
-            Compras reales en este market
+            Compras reales en este market · motores {SOURCE_LABEL[source]}
           </Label>
         </div>
         <ToggleGroup

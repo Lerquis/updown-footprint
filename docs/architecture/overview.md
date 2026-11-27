@@ -10,6 +10,8 @@ Binance WS/REST ─────────────────────�
  <sym>@depth@100ms + REST snapshot → OrderBook → muestreo 1 s ───────────────────────────────────────▶ /ws/depth
 ```
 
+**Dos fuentes** ([ADR 0016](../decisions/0016-fuente-futures-en-paralelo.md)): todo lo de arriba, desde Binance hasta los motores, la base y las compras reales, se crea una vez para **spot** (`/ws/*`) y otra para **futures**, el perpetuo USDⓈ-M (`/ws/futures/*`). Chainlink y la latencia al CLOB se comparten. [futures-source](../features/futures-source.md).
+
 ## Principio
 El servidor es el **único consumidor** de datos de mercado y el **único dueño de la lógica de análisis**: mantiene estado en memoria, de modo que un usuario que entra recibe un **snapshot inmediato** y luego deltas en vivo; todos ven los mismos datos y las mismas señales. Ver [ADR 0001](../decisions/0001-servidor-como-consumidor-unico.md) y [ADR 0006](../decisions/0006-orderflow-y-monitor-en-servidor.md).
 
@@ -32,8 +34,10 @@ El servidor es el **único consumidor** de datos de mercado y el **único dueño
 | `DbBackup` (`backup/`) | Copia periódica de la base a S3/R2 y restauración al arrancar sin base ([deployment.md](../guides/deployment.md)) |
 | `AnalysisMonitor` + `scenarios.ts` | Tendencias de precio/CVD + señales recientes → escenarios activos, score y sesgo |
 | `Channel<M>` (`server/src/ws/channel.ts`) | Canal WS genérico: snapshot al conectar + broadcast. Una instancia por tipo de dato |
-| `index.ts` | Composición, tubería de trades, muestreos de 1 s, HTTP `/health`, enrutado de upgrade, check de Origin |
-| `useWsChannel` (`web/lib`) | Conexión WS genérica con reconexión; la usan todos los hooks |
+| `source.ts` | `createSource()`: una fuente completa (spot o futures). Clientes de Binance, tubería de trades (`ingest`), orderflow, motores, tracker, base, backups, compras reales y sus canales y su API |
+| `index.ts` | Composición: Chainlink y `LatencyMonitor` compartidos, una fuente por mercado, HTTP (`/health`, `/api/compare`, `/api/replays` y la API de cada fuente), enrutado de upgrade por fuente, check de Origin |
+| `compare.ts` (`polymarket/`) | Comparativa spot vs futures por motor: adelanto y precio de la primera entrada, P&L |
+| `useWsChannel` (`web/lib`) | Conexión WS genérica con reconexión; la usan todos los hooks. Añade la fuente elegida (`lib/source.tsx`, `SourceProvider`) a la ruta |
 | `useAggTrades`, `useDepth`, `useOrderflow`, `useAnalysis` (`web/lib`) | Estado de cada canal (poda por `retentionMs`) |
 | `exchangeClock` (`web/lib`) | Estimación del reloj de Binance en el navegador |
 | `ChartView` + `chartInteractions` (`web/lib`) | Zoom/desplazamiento compartido por la gráfica de precio y la de CVD |
@@ -46,5 +50,5 @@ El servidor es el **único consumidor** de datos de mercado y el **único dueño
 - Estado solo en memoria; sin persistencia. Memoria de **15 min** (`RETENTION_MS`) para trades, heatmap y CVD; 60 barras (1 h) para footprint y señales. Ver [ADR 0005](../decisions/0005-retencion-15min-y-backfill.md).
 - Al reiniciar, trades/CVD/footprint se reconstruyen por REST (relleno); **el heatmap no** (Binance no da libro histórico): se rellena en vivo.
 - Una sola instancia del servidor (el broadcast es en-proceso).
-- Un símbolo por servidor (`SYMBOL`).
-- El heatmap cubre solo mid ± `DEPTH_RANGE_PCT` y la profundidad que Binance entrega (snapshot de 5000 niveles por lado).
+- Un símbolo por servidor (`SYMBOL`), con dos fuentes: spot y futures.
+- El heatmap cubre solo mid ± `DEPTH_RANGE_PCT` y la profundidad que Binance entrega (snapshot de 5000 niveles por lado en spot, 1000 en futures).

@@ -12,7 +12,7 @@ import {
   type UpstreamState,
 } from "@updown/protocol";
 import { PASS_KEY } from "./useTrading";
-import { HTTP_BASE, useWsChannel, type LinkState } from "./useWsChannel";
+import { useApiUrl, useWsChannel, type LinkState } from "./useWsChannel";
 
 export interface LatencyView {
   link: LinkState;
@@ -32,6 +32,7 @@ export interface LatencyView {
 
 /** Canal /ws/latency: el servidor mide la latencia al CLOB de Polymarket cada `intervalMs` (baja frecuencia, sin rAF). */
 export function useLatency(): LatencyView {
+  const apiUrl = useApiUrl();
   const [view, setView] = useState<Omit<LatencyView, "link" | "setMaker">>({
     upstream: "connecting",
     intervalMs: 15_000,
@@ -72,7 +73,7 @@ export function useLatency(): LatencyView {
     if (!pass) return "falta la contraseña";
     try {
       const body: MakerProbeRequest = { enabled, engine };
-      const r = await fetch(`${HTTP_BASE}/api/latency/maker`, {
+      const r = await fetch(apiUrl("/api/latency/maker"), {
         method: "POST",
         headers: { "content-type": "application/json", "x-trading-password": pass },
         body: JSON.stringify(body),
@@ -88,7 +89,7 @@ export function useLatency(): LatencyView {
     } catch (e) {
       return e instanceof Error ? e.message : String(e);
     }
-  }, []);
+  }, [apiUrl]);
 
   return { link, ...view, setMaker };
 }

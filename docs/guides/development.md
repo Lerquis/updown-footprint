@@ -16,8 +16,15 @@ Copiar `apps/*/.env.example` a `.env` / `.env.local` si se quiere cambiar la con
 | server | `PORT` | 4000 | Puerto HTTP/WS |
 | server | `ALLOWED_ORIGIN` | vacío | Origin permitido en upgrade WS (vacío = todos) |
 | server | `SYMBOL` | btcusdt | Símbolo |
-| server | `BINANCE_WS_URL` | wss://stream.binance.com:9443/ws | Spot; futuros: `wss://fstream.binance.com/ws` |
-| server | `BINANCE_REST_URL` | https://api.binance.com/api/v3 | Snapshot del libro y relleno de trades |
+| server | `BINANCE_WS_URL` | wss://stream.binance.com:9443/ws | Fuente spot |
+| server | `BINANCE_REST_URL` | https://api.binance.com/api/v3 | Fuente spot: snapshot del libro y relleno de trades |
+| server | `FUTURES_ENABLED` | true | Fuente futures en paralelo ([futures-source](../features/futures-source.md)) |
+| server | `BINANCE_FUTURES_TRADES_WS_URL` | wss://fstream.binance.com/market/ws | Fuente futures: aggTrades. **No** usar `/ws`: ahí el aggTrade conecta pero no envía nada |
+| server | `BINANCE_FUTURES_DEPTH_WS_URL` | wss://fstream.binance.com/public/ws | Fuente futures: libro (depth) |
+| server | `BINANCE_FUTURES_REST_URL` | https://fapi.binance.com/fapi/v1 | Fuente futures: snapshot del libro y relleno |
+| server | `FUTURES_DEPTH_SNAPSHOT_LIMIT` | 1000 | Niveles del snapshot del libro de futuros (máximo 1000) |
+| server | `FUTURES_BACKFILL_DELAY_MS` | 600 | Pausa entre páginas del relleno de futuros (rate limit) |
+| server | `FUTURES_DB_PATH` | junto a `PM_DB_PATH`: `polymarket-futures.db` | Base de futures (con la generación: `polymarket-futures-v2.db`) |
 | server | `RETENTION_MS` | 900000 | **Memoria** de trades, heatmap y CVD (15 min). Ver ADR 0005 para cuánto cuesta subirla |
 | server | `TRADES_MAX` | 100000 | Tope de seguridad de trades en memoria |
 | server | `BACKFILL` | true | Rellenar la memoria por REST al arrancar |

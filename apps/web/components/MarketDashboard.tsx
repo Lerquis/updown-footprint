@@ -1,7 +1,9 @@
 "use client";
 
+import Link from "next/link";
 import { useRef, useState } from "react";
-import { Button } from "@/components/ui/button";
+import { SOURCES, type MarketSource } from "@updown/protocol";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
@@ -14,6 +16,7 @@ import { useDepth } from "@/lib/useDepth";
 import { useOrderflow } from "@/lib/useOrderflow";
 import { usePolymarket } from "@/lib/usePolymarket";
 import { useLatency } from "@/lib/useLatency";
+import { SOURCE_LABEL, SourceProvider, useSource, useStoredSource } from "@/lib/source";
 import { BookmapChart } from "./BookmapChart";
 import { CvdChart } from "./CvdChart";
 import { FootprintPanel } from "./FootprintPanel";
@@ -31,7 +34,30 @@ const WINDOWS = [
   { label: "15m", ms: 900_000 },
 ] as const;
 
-export function MarketDashboard() {
+/** Panel completo de una fuente (spot o futures). Al cambiar de fuente se monta de nuevo: todo se conecta a la otra. */
+export function SourceDashboard() {
+  const [source, setSource] = useStoredSource();
+  return (
+    <SourceProvider source={source}>
+      <MarketDashboard key={source} onSourceChange={setSource} />
+    </SourceProvider>
+  );
+}
+
+function SourceSwitch({ value, onChange }: { value: MarketSource; onChange: (s: MarketSource) => void }) {
+  return (
+    <ToggleGroup variant="outline" size="sm" spacing={0} value={[value]} onValueChange={(v) => v[0] && onChange(v[0] as MarketSource)}>
+      {SOURCES.map((s) => (
+        <ToggleGroupItem key={s} value={s}>
+          {SOURCE_LABEL[s]}
+        </ToggleGroupItem>
+      ))}
+    </ToggleGroup>
+  );
+}
+
+function MarketDashboard({ onSourceChange }: { onSourceChange: (s: MarketSource) => void }) {
+  const source = useSource();
   const agg = useAggTrades();
   const depth = useDepth();
   const flow = useOrderflow();
@@ -53,9 +79,16 @@ export function MarketDashboard() {
   return (
     <main className="mx-auto flex max-w-6xl flex-col gap-4 p-4">
       <header className="flex flex-wrap items-center justify-between gap-2">
-        <h1 className="text-lg font-semibold">
-          Updown Footprint {agg.symbol && <span className="ml-2 text-yellow-500">{agg.symbol}</span>}
-        </h1>
+        <div className="flex flex-wrap items-center gap-3">
+          <h1 className="text-lg font-semibold">
+            Updown Footprint {agg.symbol && <span className="ml-2 text-yellow-500">{agg.symbol}</span>}
+            <span className="ml-2 text-sm font-normal text-muted-foreground">{source === "futures" ? "perpetuo USDⓈ-M" : "spot"}</span>
+          </h1>
+          <SourceSwitch value={source} onChange={onSourceChange} />
+          <Link href="/compare" className={buttonVariants({ variant: "outline", size: "sm" })}>
+            Comparar spot vs futures
+          </Link>
+        </div>
         <div className="flex flex-wrap gap-2">
           <LiveBadge label="Trades" link={agg.link} upstream={agg.upstream} />
           <LiveBadge label="Libro" link={depth.link} upstream={depth.upstream} />

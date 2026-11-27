@@ -9,6 +9,7 @@
 |---|---|
 | Quién dispara | Las señales del motor elegido al activar: **A** (T + 0, lo antes posible), **C** (T + 150 ms, por defecto) o **D** (predictivo, cada 100 ms; [predictive-engines](predictive-engines.md)) |
 | Cuándo | Solo con el interruptor activado, solo en el **market en curso**. Se apaga solo al cambiar de market y al reiniciar el servidor |
+| Fuente | Hay un interruptor **por fuente** (spot y futures, [futures-source](futures-source.md)), cada uno sigue a los motores de su fuente. Misma contraseña y misma cartera; el tope por market es de cada fuente, así que con las dos activadas la exposición máxima se duplica |
 | Importe de compra | **Proporcional:** paper ÷ 5 (`PM_LIVE_SCALE` 0.2), es decir, paper 5..50 → **1..10 USDC** (`PM_LIVE_MIN_USD`/`MAX_USD`). **Mínimo:** lo menos que acepta Polymarket y se puede vender después, `max(1 USDC, 5 tokens × precio de la señal)`. Se elige al activar |
 | Mínimo de Polymarket | Se sube a `max(1 USDC, 5 tokens × precio de la señal)` para poder venderlo después. Si no cabe en 10 USDC o en el tope del market, se omite |
 | Tope por market | 40 USDC en compras (`PM_LIVE_MAX_MARKET_USD`) |

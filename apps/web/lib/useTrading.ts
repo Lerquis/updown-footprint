@@ -2,7 +2,7 @@
 
 import { useCallback, useState } from "react";
 import { CHANNELS, type LiveEngine, type LiveSizing, type LiveTrade, type LiveTradingState, type TradingArmRequest, type TradingServerMessage } from "@updown/protocol";
-import { HTTP_BASE, useWsChannel, type LinkState } from "./useWsChannel";
+import { useApiUrl, useWsChannel, type LinkState } from "./useWsChannel";
 
 export const PASS_KEY = "updown.tradingPassword";
 
@@ -20,6 +20,7 @@ export interface TradingView {
 
 /** Canal /ws/trading (compras reales del motor C) + interruptor por HTTP con contrasena (guardada en este navegador). */
 export function useTrading(): TradingView {
+  const apiUrl = useApiUrl();
   const [state, setState] = useState<LiveTradingState | null>(null);
   const [trades, setTrades] = useState<LiveTrade[]>([]);
   const [hasPassword, setHasPassword] = useState(() => typeof window !== "undefined" && !!localStorage.getItem(PASS_KEY));
@@ -51,7 +52,7 @@ export function useTrading(): TradingView {
     if (!pass) return "falta la contraseña";
     try {
       const body: TradingArmRequest = { slug, armed, engine: opts.engine, sizing: opts.sizing };
-      const r = await fetch(`${HTTP_BASE}/api/trading/arm`, {
+      const r = await fetch(apiUrl("/api/trading/arm"), {
         method: "POST",
         headers: { "content-type": "application/json", "x-trading-password": pass },
         body: JSON.stringify(body),
@@ -69,7 +70,7 @@ export function useTrading(): TradingView {
     } catch (e) {
       return e instanceof Error ? e.message : String(e);
     }
-  }, []);
+  }, [apiUrl]);
 
   const forgetPassword = useCallback(() => {
     localStorage.removeItem(PASS_KEY);

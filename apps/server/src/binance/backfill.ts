@@ -18,6 +18,9 @@ export async function backfillTrades(
   symbol: string,
   fromTime: number,
   onTrade: (t: AggTrade) => void,
+  /** pausa entre paginas (rate limit: spot pesa 2 por pagina, futuros 20) */
+  pageDelayMs = 60,
+  tag = "backfill",
 ): Promise<number> {
   const sym = symbol.toUpperCase();
   let count = 0;
@@ -34,10 +37,10 @@ export async function backfillTrades(
       }
       if (batch.length < 1000) break;
       fromId = batch[batch.length - 1]!.a + 1;
-      await new Promise((r) => setTimeout(r, 60)); // cortesia con el rate limit
+      await new Promise((r) => setTimeout(r, pageDelayMs)); // cortesia con el rate limit
     }
   } catch (err) {
-    console.error("[backfill] interrupted:", (err as Error).message);
+    console.error(`[${tag}] interrupted:`, (err as Error).message);
   }
   return count;
 }

@@ -12,7 +12,8 @@
 | Motores D (predictivo, taker con límite) y E (libro, maker), papel con latencia y cola reales | Implementada (solo papel; D se puede seguir con compras reales) | [predictive-engines.md](predictive-engines.md) |
 | Latencia al CLOB de Polymarket (cada 15 s, solo lectura) | Implementada | [latency.md](latency.md) |
 | Replays del motor A con ejecución retrasada (0–3 s), página `/replays` | Implementada | [replays.md](replays.md) |
-| Compras reales del motor A, C o D (interruptor por market, proporcional o mínimo) | Implementada | [live-trading.md](live-trading.md) |
+| Compras reales del motor A, C o D (interruptor por market y por fuente, proporcional o mínimo) | Implementada | [live-trading.md](live-trading.md) |
+| Fuente futures (perpetuo USDⓈ-M) en paralelo a spot + comparativa `/compare` | Implementada | [futures-source.md](futures-source.md) |
 
 ## Formato de un feature doc
 `# Nombre` · **Estado** · **Objetivo** · **Servidor** (archivos/flujo) · **Frontend** (archivos) · **Protocolo** (enlace a `protocol.md`) · **Pendiente / ideas**.

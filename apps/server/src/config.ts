@@ -1,4 +1,4 @@
-import { basename, join, resolve, sep } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 
 /**
  * Generacion de la base de datos: al cambiar el formato de lo que se guarda se empieza una base nueva
@@ -23,6 +23,9 @@ const dbBase = resolveDbPath(dbRequested, process.env.RAILWAY_VOLUME_MOUNT_PATH)
 if (dbBase !== dbRequested)
   console.warn(`[db] PM_DB_PATH=${dbRequested} esta fuera del volumen ${process.env.RAILWAY_VOLUME_MOUNT_PATH}: se usa ${dbBase}`);
 const prefixBase = process.env.BACKUP_PREFIX ?? "updown/";
+/** Base de la fuente futures (ADR 0016): otra base, al lado de la de spot salvo que FUTURES_DB_PATH diga otra cosa */
+const futuresDbRequested = process.env.FUTURES_DB_PATH ?? join(dirname(dbRequested), "polymarket-futures.db");
+const futuresDbBase = resolveDbPath(futuresDbRequested, process.env.RAILWAY_VOLUME_MOUNT_PATH);
 
 const num = (v: string | undefined, d: number) => (v && !Number.isNaN(Number(v)) ? Number(v) : d);
 const bool = (v: string | undefined, d: boolean) => (v === undefined ? d : v === "1" || v.toLowerCase() === "true");
@@ -37,6 +40,28 @@ export const config = {
   symbol: (process.env.SYMBOL ?? "btcusdt").toLowerCase(),
   binanceWsUrl: process.env.BINANCE_WS_URL ?? "wss://stream.binance.com:9443/ws",
   binanceRestUrl: process.env.BINANCE_REST_URL ?? "https://api.binance.com/api/v3",
+
+  /**
+   * Fuente futures (perpetuo USDⓈ-M, ADR 0016): mismo sistema (motores, base, compras reales) con los datos de futuros.
+   * Su base y sus backups van aparte; la de spot no se toca.
+   */
+  futures: {
+    enabled: bool(process.env.FUTURES_ENABLED, true),
+    /**
+     * Binance separo las rutas WS de futuros: aggTrade solo llega por /market (en la ruta antigua /ws conecta pero no envia nada)
+     * y el libro (depth) por /public.
+     */
+    tradesWsUrl: process.env.BINANCE_FUTURES_TRADES_WS_URL ?? "wss://fstream.binance.com/market/ws",
+    depthWsUrl: process.env.BINANCE_FUTURES_DEPTH_WS_URL ?? "wss://fstream.binance.com/public/ws",
+    restUrl: process.env.BINANCE_FUTURES_REST_URL ?? "https://fapi.binance.com/fapi/v1",
+    /** el snapshot REST del libro de futuros admite como maximo 1000 niveles */
+    depthSnapshotLimit: num(process.env.FUTURES_DEPTH_SNAPSHOT_LIMIT, 1000),
+    /** pausa entre paginas del relleno: /fapi/v1/aggTrades pesa 20 (limite 2400/min) */
+    backfillPageDelayMs: num(process.env.FUTURES_BACKFILL_DELAY_MS, 600),
+    dbPath: withGeneration(futuresDbBase),
+    /** carpeta propia en el bucket, fuera de la de spot (p. ej. updown-futures/v2/) */
+    backupPrefix: `${prefixBase.replace(/\/$/, "")}-futures/${DB_GENERATION}/`,
+  },
 
   retentionMs,
   /** Tope de seguridad de trades en memoria (además del límite por tiempo) */
