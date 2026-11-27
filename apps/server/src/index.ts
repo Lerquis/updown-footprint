@@ -7,6 +7,7 @@ import {
   type AnalysisServerMessage,
   type DepthServerMessage,
   type EnginesServerMessage,
+  type LatencyServerMessage,
   type OrderflowServerMessage,
   type PmEngineId,
   type PmMarketsResponse,
@@ -36,6 +37,7 @@ import { DEFAULT_STRATEGY } from "./polymarket/strategy.js";
 import { DbBackup } from "./backup/backup.js";
 import { PmFeed, scheduleEngine, TimedEngine } from "./polymarket/timedEngine.js";
 import { slotStart } from "./polymarket/tracker.js";
+import { LatencyMonitor } from "./polymarket/latency.js";
 
 const SYMBOL = config.symbol.toUpperCase();
 
@@ -192,6 +194,33 @@ const engines = new Channel<EnginesServerMessage>(() => ({
   >,
 }));
 
+// Latencia hacia el CLOB de Polymarket cada 15 s (solo lectura: nunca opera). Libro del token Up del market en curso.
+const latencyMonitor = new LatencyMonitor(
+  {
+    clobUrl: config.pmClobUrl,
+    creds: { ...config.pmClob, address: config.pmSignerAddress, funder: config.pmFunderAddress },
+    intervalMs: config.pmLatencyIntervalMs,
+    keepAliveMs: config.pmLatencyKeepAliveMs,
+    historyMax: config.pmLatencyHistory,
+  },
+  () => tracker.current?.upToken ?? tracker.next?.upToken ?? null,
+  () => clock.now(),
+);
+if (!latencyMonitor.authReady) console.log("[latency] sin PM_SIGNER_ADDRESS o credenciales CLOB: la medida autenticada respondera 401 (la latencia del gateway sigue siendo valida)");
+const latency = new Channel<LatencyServerMessage>(() => ({
+  type: "snapshot",
+  intervalMs: config.pmLatencyIntervalMs,
+  target: new URL(config.pmClobUrl).host,
+  region: config.region,
+  transport: "h2",
+  authReady: latencyMonitor.authReady,
+  history: latencyMonitor.history.slice(),
+  historyMax: config.pmLatencyHistory,
+  upstream: latencyMonitor.state,
+}));
+latencyMonitor.on("sample", (sample) => latency.broadcast({ type: "sample", sample }));
+latencyMonitor.on("state", (upstream) => latency.broadcast({ type: "status", upstream }));
+
 // ── Tuberia de trades: relleno historico + vivo, sin duplicados ──
 let ready = false;
 let lastId = 0;
@@ -298,9 +327,10 @@ const http = createServer((req, res) => {
         ready,
         upstream: upstream.state,
         memory: { trades: buffer.size, depthColumns: depthHistory.size, bars: engine.bars.length, cvdPoints: engine.cvdPoints.length, signals: engine.signals.length },
-        clients: { aggTrades: aggTrades.size, depth: depth.size, orderflow: orderflow.size, analysis: analysis.size, polymarket: polymarket.size, engines: engines.size },
+        clients: { aggTrades: aggTrades.size, depth: depth.size, orderflow: orderflow.size, analysis: analysis.size, polymarket: polymarket.size, engines: engines.size, latency: latency.size },
         polymarket: { upstream: pmUpstream(), chainlink: chainlink.state, current: tracker.current?.slug ?? null, history: tracker.history.length, saved: marketStore.count(), engines: Object.fromEntries(ENGINE_IDS.map((id) => [id, { market: engines3[id].slug, decisions: engines3[id].decisions.length, delayMs: config.pmEngineDelayMs[id] }])) },
         depth: { upstream: depthClient.state },
+        latency: { region: config.region, authReady: latencyMonitor.authReady, reconnects: latencyMonitor.reconnects, last: latencyMonitor.history.at(-1) ?? null },
       }),
     );
     return;
@@ -344,6 +374,7 @@ mount(CHANNELS.orderflow, orderflow);
 mount(CHANNELS.analysis, analysis);
 mount(CHANNELS.polymarket, polymarket);
 mount(CHANNELS.engines, engines);
+mount(CHANNELS.latency, latency);
 
 http.on("upgrade", (req, socket, head) => {
   const origin = req.headers.origin;
@@ -365,6 +396,7 @@ http.listen(config.port, async () => {
   upstream.start();
   depthClient.start();
   chainlink.start();
+  latencyMonitor.start();
 
   if (config.backfill) {
     const t0 = Date.now();
@@ -384,6 +416,7 @@ const shutdown = () => {
   upstream.stop();
   depthClient.stop();
   chainlink.stop();
+  latencyMonitor.stop();
   tracker.stop();
   dbBackup?.stop();
   marketStore.close();

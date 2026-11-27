@@ -28,6 +28,7 @@ export const CHANNELS = {
   analysis: "/ws/analysis",
   polymarket: "/ws/polymarket",
   engines: "/ws/engines",
+  latency: "/ws/latency",
 } as const;
 
 // ───────────────────────── Canal aggTrades ─────────────────────────
@@ -701,3 +702,60 @@ export type EnginesServerMessage =
     }
   /** nueva decision de un motor; si cambia `slug`, empieza un market nuevo (el cliente vacia ese motor) */
   | { type: "decision"; engine: PmEngineId; slug: string; decision: PmDecision };
+
+// ───────────────────────── Canal latency (latencia hacia el CLOB de Polymarket) ─────────────────────────
+
+/**
+ * Medidas de una ronda (nunca se opera). Una orden real es firma local + `POST /order` autenticado; el precio no viaja como campo
+ * (va implicito en makerAmount/takerAmount) y sale del libro que el servidor ya recibe por WS, asi que `book` es opcional
+ * (clob-client solo lo pide por REST si no se le pasa precio).
+ * Todo salvo `connect` va por una conexion HTTP/2 persistente y siempre caliente (la de un bot).
+ * connect: GET /time con conexion nueva HTTP/1.1 (DNS + TCP + TLS + ida y vuelta) · edge: PING de HTTP/2, lo responde el borde de
+ * Cloudflare (red pura, sin Polymarket) · ping: GET /time con la conexion ya abierta ·
+ * book: GET /book del token Up del market en curso · auth: GET /balance-allowance autenticado (L2) ·
+ * order: POST /order con una orden completa (proxy wallet, token del market, 1 USDC, FOK) y FIRMA DE CEROS: Polymarket la rechaza al
+ *   verificar la firma (400 "invalid POLY_PROXY signature"), justo antes del matching. Nunca puede ejecutarse.
+ */
+export type LatencyProbeId = "connect" | "edge" | "ping" | "book" | "auth" | "order";
+
+export interface LatencyProbe {
+  /** ida y vuelta en ms; null si fallo o no se pudo medir */
+  ms: number | null;
+  /** codigo HTTP de la respuesta (p. ej. 401 en `auth` sin PM_SIGNER_ADDRESS: la latencia sigue siendo la del gateway) */
+  status: number | null;
+  /** mensaje de Polymarket en la respuesta (p. ej. "invalid POLY_PROXY signature" en `order`) */
+  detail?: string;
+  /** error de red / timeout */
+  error?: string;
+}
+
+export interface LatencySample {
+  /** inicio de la ronda, reloj de Binance (ms) */
+  time: number;
+  probes: Record<LatencyProbeId, LatencyProbe>;
+  /** ms en preparar la orden al decidir (cuerpo + HMAC de la peticion); sin la firma EIP-712 real */
+  prepMs: number | null;
+  /** estimacion de una orden con la conexion caliente = prepMs + POST /order (o auth, o ping si fallan); sin firma EIP-712 ni matching */
+  estimateMs: number | null;
+}
+
+export type LatencyServerMessage =
+  | {
+      type: "snapshot";
+      /** cada cuanto mide el servidor (ms) */
+      intervalMs: number;
+      /** host medido */
+      target: string;
+      /** desde donde mide el servidor: region de Railway (RAILWAY_REPLICA_REGION) o "local" */
+      region: string;
+      /** protocolo de la conexion caliente */
+      transport: "h2";
+      /** true si hay credenciales L2 completas (API key + secret + passphrase + direccion del firmante); si no, auth y order responden 401 */
+      authReady: boolean;
+      /** rondas recientes, antiguo -> reciente */
+      history: LatencySample[];
+      historyMax: number;
+      upstream: UpstreamState;
+    }
+  | { type: "sample"; sample: LatencySample }
+  | { type: "status"; upstream: UpstreamState };

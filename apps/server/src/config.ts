@@ -66,6 +66,20 @@ export const config = {
     secret: process.env.PM_CLOB_SECRET ?? "",
     passphrase: process.env.PM_CLOB_PASSPHRASE ?? "",
   },
+  /** CLOB REST de Polymarket (mismo host al que se envian las ordenes) */
+  pmClobUrl: process.env.PM_CLOB_URL ?? "https://clob.polymarket.com",
+  /** EOA que creo la API key (POLY_ADDRESS de las cabeceras L2). Sin ella las peticiones autenticadas responden 401. */
+  pmSignerAddress: (process.env.PM_SIGNER_ADDRESS ?? "").trim(),
+  /** Proxy wallet de la cuenta (maker de las ordenes; gamma /public-profile?address=<signer> -> proxyWallet) */
+  pmFunderAddress: (process.env.PM_FUNDER_ADDRESS ?? "").trim(),
+  // ── Latencia hacia el CLOB (/ws/latency, docs/features/latency.md): solo lectura, nunca opera ──
+  pmLatencyIntervalMs: num(process.env.PM_LATENCY_INTERVAL_MS, 15_000),
+  /** PING de HTTP/2 para mantener caliente la conexion al CLOB */
+  pmLatencyKeepAliveMs: num(process.env.PM_LATENCY_KEEPALIVE_MS, 5_000),
+  /** desde donde mide el servidor (Railway la define; en local no existe) */
+  region: process.env.RAILWAY_REPLICA_REGION ?? "local",
+  /** Rondas guardadas en memoria (40 x 15 s = 10 min) */
+  pmLatencyHistory: num(process.env.PM_LATENCY_HISTORY, 40),
   pmBookWsUrl: process.env.PM_BOOK_WS_URL ?? "wss://ws-subscriptions-frontend-clob.polymarket.com/ws/market",
   pmGammaUrl: process.env.PM_GAMMA_URL ?? "https://gamma-api.polymarket.com",
   pmSiteUrl: process.env.PM_SITE_URL ?? "https://polymarket.com",

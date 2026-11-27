@@ -9,6 +9,7 @@
 | Motor de señales de compra/venta Up/Down 5m + base de datos de markets | Implementada | [signal-engine.md](signal-engine.md) |
 | Markets Polymarket BTC Up/Down 5m (en vivo + historial) | Implementada | [polymarket-markets.md](polymarket-markets.md) |
 | Motores A, B y C (cronometrados, los tres guardados) y drawer de decisiones | Implementada | [engines.md](engines.md) |
+| Latencia al CLOB de Polymarket (cada 15 s, solo lectura) | Implementada | [latency.md](latency.md) |
 
 ## Formato de un feature doc
 `# Nombre` · **Estado** · **Objetivo** · **Servidor** (archivos/flujo) · **Frontend** (archivos) · **Protocolo** (enlace a `protocol.md`) · **Pendiente / ideas**.

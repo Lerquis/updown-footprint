@@ -13,11 +13,13 @@ import { useChartViewCustom } from "@/lib/useChartViewCustom";
 import { useDepth } from "@/lib/useDepth";
 import { useOrderflow } from "@/lib/useOrderflow";
 import { usePolymarket } from "@/lib/usePolymarket";
+import { useLatency } from "@/lib/useLatency";
 import { BookmapChart } from "./BookmapChart";
 import { CvdChart } from "./CvdChart";
 import { FootprintPanel } from "./FootprintPanel";
 import { HeatmapHelp } from "./HeatmapHelp";
 import { HeatmapLegend } from "./HeatmapLegend";
+import { LatencyPanel } from "./LatencyPanel";
 import { LiveBadge } from "./LiveBadge";
 import { PolymarketPanel } from "./PolymarketPanel";
 import { TradesTable } from "./TradesTable";
@@ -34,6 +36,7 @@ export function MarketDashboard() {
   const depth = useDepth();
   const flow = useOrderflow();
   const pm = usePolymarket();
+  const lat = useLatency();
 
   // Vista (zoom/desplazamiento) compartida por la grafica de precio y la de CVD; vive fuera de React.
   const viewRef = useRef<ChartView | null>(null);
@@ -142,6 +145,7 @@ export function MarketDashboard() {
         </CardContent>
       </Card>
 
+      <LatencyPanel lat={lat} />
       <PolymarketPanel pm={pm} flow={flow} />
       <FootprintPanel bars={flow.bars} signals={flow.signals} />
 

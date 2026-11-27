@@ -53,7 +53,7 @@ Todos los timestamps (`AggTrade.time`, `DepthColumn.time`, `FootprintBar.start`,
 
 | `type` | Campos | Cuándo |
 |---|---|---|
-| `snapshot` | `summary: MarketSummary \| null`, `history: MarketSummary[]`, `upstream` | Al conectar |
+| `snapshot` | `summary: MarketSummary \|ms | null, status | null`, `history: MarketSummary[]`, `upstream` | Al conectar |
 | `summary` | `summary` | Cada segundo |
 | `change` | `summary` | Cuando cambia el sesgo o el conjunto de escenarios activos |
 | `status` | `upstream` | Cambia el estado de la conexión a Binance |
@@ -64,16 +64,16 @@ Todos los timestamps (`AggTrade.time`, `DepthColumn.time`, `FootprintBar.start`,
 
 | `type` | Campos | Cuándo |
 |---|---|---|
-| `snapshot` | `current: PmMarket \| null`, `next`, `points: PmPoint[]`, `trades: PmSignal[]`, `history: PmRecord[]`, `historyMax`, `upstream` | Al conectar |
+| `snapshot` | `current: PmMarket \|ms | null, status | null`, `next`, `points: PmPoint[]`, `trades: PmSignal[]`, `history: PmRecord[]`, `historyMax`, `upstream` | Al conectar |
 | `markets` | `current`, `next` | Rota el market o llega un dato nuevo (tokens) |
 | `point` | `point: PmPoint` | Cada segundo (market en curso) |
 | `signal` | `signal: PmSignal` | El motor señala comprar o vender un token en el market en curso |
 | `record` | `record: PmRecord` | Market archivado (≈5 s tras terminar) y otra vez cuando llega el resultado oficial. El cliente hace upsert por `market.slug` |
 | `status` | `upstream` | Cambia la conexión con Polymarket (libro de tokens o stream de Chainlink) |
 
-- `PmMarket`: `slug`, `title`, `start/end` (ms, UTC, múltiplos de 5 min), `upToken/downToken`, `priceToBeat` (openPrice; null hasta que Polymarket lo publica), `closePrice` y `changePct` (null hasta resolver), `status` (`upcoming | live | resolving | closed`) y `result` (`up | down | null`, resultado oficial de Polymarket).
-- `PmPoint`: `time`, `chainlink` (precio BTC/USD de Chainlink, TWAP de 60 s; spot si faltan credenciales; null hasta el primero), `upBid/upAsk/downBid/downAsk` (mejores precios de cada token, probabilidad 0-1) y lo que usa el motor: `binance` (spot), `basis` (Chainlink − media 60 s de Binance, suavizado), `sigma` (volatilidad, USD/√s), `flow` (-1..1) y `pModel` (P de Up según el motor).
-- `PmRecord`: `market` + `points` + lo que el servidor tenía de Binance dentro de `[start, end)`: `bars` (footprint), `cvd`, `signals`; además `trades: PmSignal[]` (señales del motor), `pnl: PmPnl` (resultado de papel; `net`/`roi` null hasta resolver) y `complete` (el servidor tuvo datos de los 5 min; solo esos van a la base de datos).
+- `PmMarket`: `slug`, `title`, `start/end` (ms, UTC, múltiplos de 5 min), `upToken/downToken`, `priceToBeat` (openPrice;ms | null, status | null hasta que Polymarket lo publica), `closePrice` y `changePct` (null hasta resolver), `status` (`upcoming | live | resolving | closed`) y `result` (`up | down | null`, resultado oficial de Polymarket).
+- `PmPoint`: `time`, `chainlink` (precio BTC/USD de Chainlink, TWAP de 60 s; spot si faltan credenciales;ms | null, status | null hasta el primero), `upBid/upAsk/downBid/downAsk` (mejores precios de cada token, probabilidad 0-1) y lo que usa el motor: `binance` (spot), `basis` (Chainlink − media 60 s de Binance, suavizado), `sigma` (volatilidad, USD/√s), `flow` (-1..1) y `pModel` (P de Up según el motor).
+- `PmRecord`: `market` + `points` + lo que el servidor tenía de Binance dentro de `[start, end)`: `bars` (footprint), `cvd`, `signals`; además `trades: PmSignal[]` (señales del motor), `pnl: PmPnl` (resultado de papel; `net`/`roi`ms | null, status | null hasta resolver) y `complete` (el servidor tuvo datos de los 5 min; solo esos van a la base de datos).
 - `PmSignal`: `action` (`buy | sell`), `side` (`up | down`), `reason` (`entry | exit | flip | hedge`), `price` (ask al comprar, bid al vender), `fee`, `shares`, `amount` (USDC), `pSide` (P del motor de que ese lado gane), `edge` (EV por token), `tau` (s que faltaban). Ver [signal-engine](../features/signal-engine.md).
 - `upstream` = `connected` solo si están conectados el libro de tokens (market en curso) y el stream de Chainlink. Ver [polymarket-markets](../features/polymarket-markets.md).
 
@@ -83,6 +83,13 @@ Registro de decisiones de los motores A, B y C. Bajo demanda: el frontend solo l
 - `decision`: `{ engine: "a"|"b"|"c", slug, decision: PmDecision }`, una por segundo y motor. Si `slug` cambia, ese motor empezó un market nuevo y el cliente vacía su lista.
 - `PmDecision`: `time`, `tau`, precios (`chainlink`, `upBid/upAsk/downBid/downAsk`), `pModel` (solo modelo), `pMarket` (mercado), `pUp` (mezcla con que decide); por lado (`up`/`down`): `shares`, `buyEdge`/`buy`, `sellEdge`/`sell`, donde `buy`/`sell` es un `PmBlock` (`ok` = ejecuta, o el primer impedimento); `signals` emitidas ese segundo.
 
+## Canal `/ws/latency` (latencia a Polymarket)
+El servidor mide cada `intervalMs` (15 s) la latencia al CLOB de Polymarket (nunca opera: `POST /order` lleva una orden completa firmada con ceros y Polymarket la rechaza al verificar la firma). Ver [latency](../features/latency.md).
+- `snapshot`: `{ intervalMs, target (host), region ("local" o región de Railway), transport ("h2"), authReady, history: LatencySample[] (antiguo → reciente), historyMax, upstream }`.
+- `sample`: `{ sample: LatencySample }`, una por ronda.
+- `status`: `{ upstream }`: `connected` si el último `ping` respondió.
+- `LatencySample`: `time` (inicio de la ronda, reloj de Binance), `probes: { connect|edge|ping|book|auth|order: { ms: number | null, status: number | null, detail? (mensaje de Polymarket), error? (red) } }`, `prepMs` (preparar la orden: cuerpo + HMAC), `estimateMs` (`prepMs` + `order`, o `auth`, o `ping` si fallan; el precio sale del libro por WS).
+
 ## Otros endpoints
-- `GET /health` → `{ ok, ready, upstream, memory: {trades, depthColumns, bars, cvdPoints, signals}, clients: {…por canal}, depth: {upstream}, polymarket: {upstream, chainlink, current, history, saved, engines: {a|b|c: {market, decisions, delayMs}}} }`. `ready` pasa a `true` cuando termina el relleno inicial.
+- `GET /health` → `{ ok, ready, upstream, memory: {trades, depthColumns, bars, cvdPoints, signals}, clients: {…por canal}, depth: {upstream}, latency: {authReady, last}, polymarket: {upstream, chainlink, current, history, saved, engines: {a|b|c: {market, decisions, delayMs}}} }`. `ready` pasa a `true` cuando termina el relleno inicial.
 - `GET /api/markets` → `PmMarketsResponse`: `{ total, markets: PmMarketRow[] }` con una fila resumen por market guardado en la base de datos (lo justo para la tabla del historial: price to beat, cierre, cambio %, resultado, delta footprint, Δ CVD, señales alcistas/bajistas, Up inicio→fin, operaciones del motor, invertido/vendido/neto, `engineVersion`, `tradesOk`). No incluye `points`, barras ni CVD. Parámetros opcionales: `limit` (por defecto todos), `from` / `to` (filtran por inicio en ms; `to` exclusivo) y `order=asc|desc` (por defecto `desc`, más recientes primero). CORS abierto salvo que `ALLOWED_ORIGIN` esté definido. `GET /api/markets/<slug>` → el `PmRecord` completo de un market guardado (404 si no existe; ~100 KB). El resumen se calcula al guardar (columnas de `markets`), así que listar cientos de markets no lee el JSON.
