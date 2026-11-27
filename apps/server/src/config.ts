@@ -109,6 +109,19 @@ export const config = {
     /** canal de usuario: hora exacta (ms) de cada ejecucion */
     userWsUrl: process.env.PM_USER_WS_URL ?? "wss://ws-subscriptions-clob.polymarket.com/ws/user",
   },
+  /**
+   * Check maker (docs/features/latency.md): ordenes maker REALES (post-only a mejor bid + 1 tick) que siguen las senales del motor
+   * elegido, de max(minUsd, minShares tokens), canceladas a los `restMs`. Apagado hasta activarlo con la contrasena de trading.
+   */
+  makerProbe: {
+    max: num(process.env.PM_MAKER_CHECK_MAX, 30),
+    restMs: num(process.env.PM_MAKER_CHECK_REST_MS, 2000),
+    minUsd: num(process.env.PM_MAKER_CHECK_USD, 1),
+    minShares: 5,
+    maxMarketUsd: num(process.env.PM_LIVE_MAX_MARKET_USD, 40),
+    tick: 0.01,
+    settleMs: 1500,
+  },
   /** PING de HTTP/2 para mantener caliente la conexion al CLOB */
   pmLatencyKeepAliveMs: num(process.env.PM_LATENCY_KEEPALIVE_MS, 5_000),
   /** desde donde mide el servidor (Railway la define; en local no existe) */

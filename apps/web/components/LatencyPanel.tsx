@@ -7,6 +7,7 @@ import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle }
 import { exchangeClock } from "@/lib/exchangeClock";
 import type { LatencyView } from "@/lib/useLatency";
 import { LiveBadge } from "./LiveBadge";
+import { MakerProbeCard } from "./MakerProbeCard";
 
 const PROBES: { id: LatencyProbeId; label: string; help: string }[] = [
   { id: "connect", label: "Conexión nueva", help: "GET /time abriendo conexión (DNS + TCP + TLS + ida y vuelta): lo que cuesta una orden si no hay conexión abierta. El servidor la mantiene siempre abierta (HTTP/2), así que no se paga" },
@@ -172,6 +173,7 @@ export function LatencyPanel({ lat }: { lat: LatencyView }) {
           latencia sigue siendo la del gateway; con la dirección, POST /order llega hasta la validación (400) y da la medida exacta.
         </p>
       )}
+      <MakerProbeCard lat={lat} />
     </Card>
   );
 }

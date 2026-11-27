@@ -809,6 +809,89 @@ export interface LatencySample {
   estimateMs: number | null;
 }
 
+/**
+ * Check maker: ordenes MAKER reales (limite post-only, la forma de operar del motor E) que siguen las senales del motor elegido
+ * (A, C o D). Con cada compra del motor se deja una compra a mejor bid + 1 tick (primera de la fila; si el spread es de 1 tick,
+ * se une al mejor bid) de max(1 USDC, 5 tokens), y se cancela a los `restMs` (2 s) si no se lleno. Las ventas del motor hacen
+ * lo mismo en el lado ask con los tokens que se compraron asi. Mide cada paso del ciclo y si se ejecuto. Solo con el interruptor
+ * (contrasena de trading), solo en el market en curso; se apaga sola tras `max` ordenes. Tiempos en ms desde el envio.
+ * Ver docs/features/latency.md.
+ */
+export interface MakerProbeSample {
+  /** id de la senal del motor que la disparo */
+  signalId: string;
+  engine: LiveEngine;
+  slug: string;
+  action: "buy" | "sell";
+  side: PmSide;
+  /** instante y precio de la senal (ask al comprar, bid al vender), reloj de Binance */
+  signalTime: number;
+  signalPrice: number;
+  /** precio limite de la orden maker y tokens pedidos */
+  price: number;
+  size: number;
+  /** envio de POST /order (reloj de Binance, ms); null si no se envio */
+  time: number | null;
+  /** firmar la orden en local */
+  signMs: number | null;
+  /** ida y vuelta de POST /order */
+  postMs: number | null;
+  postStatus: number | null;
+  /** estado que devuelve Polymarket (live = en el libro) */
+  orderStatus: string | null;
+  orderId: string | null;
+  /** llega el evento PLACEMENT por el canal de usuario */
+  userAckMs: number | null;
+  /** la orden aparece en el libro publico (canal de market; aproximado: cambio de su nivel con su tamano) */
+  bookMs: number | null;
+  /** primera ejecucion (evento `trade` del canal de usuario) */
+  firstFillMs: number | null;
+  /** tokens ejecutados */
+  filledShares: number;
+  /** ida y vuelta de DELETE /order (cancelar); null si se lleno entera antes */
+  cancelMs: number | null;
+  cancelStatus: number | null;
+  /** desde el envio de la cancelacion: evento CANCELLATION del canal de usuario y desaparicion del libro publico */
+  userCancelMs: number | null;
+  bookGoneMs: number | null;
+  /** marca de tiempo de Polymarket de la colocacion / cancelacion menos nuestro envio (incluye el desfase entre relojes) */
+  exchangePlaceMs: number | null;
+  exchangeCancelMs: number | null;
+  /** filled: entera · partial: en parte · unfilled: nada en `restMs` · rejected: Polymarket la rechazo (p. ej. post-only cruzaria) · skipped: no se envio · error */
+  status: "filled" | "partial" | "unfilled" | "rejected" | "skipped" | "error";
+  /** mensaje de Polymarket o motivo */
+  error: string | null;
+}
+
+export interface MakerProbeState {
+  /** hay clave y contrasena (las mismas que las compras reales) */
+  available: boolean;
+  reason: string | null;
+  enabled: boolean;
+  /** motor cuyas senales se siguen */
+  engine: LiveEngine;
+  /** ordenes enviadas desde que se activo y tope (se apaga sola al llegar) */
+  done: number;
+  max: number;
+  /** tiempo en el libro antes de cancelar (ms) */
+  restMs: number;
+  /** importe: max(minUsd, minShares tokens); tope de compras por market */
+  minUsd: number;
+  minShares: number;
+  maxMarketUsd: number;
+  /** market en curso, USDC gastados y tokens comprados asi en el */
+  currentSlug: string | null;
+  spentUsd: number;
+  position: Record<PmSide, number>;
+}
+
+/** POST /api/latency/maker (cabecera `x-trading-password`): activa o desactiva el check maker. Respuesta: `{ state }` o `{ error }` */
+export interface MakerProbeRequest {
+  enabled: boolean;
+  /** por defecto se mantiene el anterior (al arrancar: C) */
+  engine?: LiveEngine;
+}
+
 export type LatencyServerMessage =
   | {
       type: "snapshot";
@@ -826,8 +909,12 @@ export type LatencyServerMessage =
       history: LatencySample[];
       historyMax: number;
       upstream: UpstreamState;
+      /** check maker: ordenes maker reales siguiendo a un motor (antiguo -> reciente) */
+      maker: { state: MakerProbeState; history: MakerProbeSample[] };
     }
   | { type: "sample"; sample: LatencySample }
+  | { type: "makerSample"; sample: MakerProbeSample }
+  | { type: "makerState"; state: MakerProbeState }
   | { type: "status"; upstream: UpstreamState };
 
 // ───────────────────────── Canal trading (compras reales del motor C) ─────────────────────────

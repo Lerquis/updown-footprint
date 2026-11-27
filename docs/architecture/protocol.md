@@ -93,6 +93,10 @@ El servidor mide cada `intervalMs` (15 s) la latencia al CLOB de Polymarket (nun
 - `snapshot`: `{ intervalMs, target (host), region ("local" o región de Railway), transport ("h2"), authReady, history: LatencySample[] (antiguo → reciente), historyMax, upstream }`.
 - `sample`: `{ sample: LatencySample }`, una por ronda.
 - `status`: `{ upstream }`: `connected` si el último `ping` respondió.
+- `snapshot` incluye `maker: { state: MakerProbeState, history: MakerProbeSample[] }`; `makerSample` `{ sample }` al terminar cada orden (upsert por `signalId`) y `makerState` `{ state }` al activar/desactivar o cambiar el gasto. Check maker (órdenes maker reales siguiendo a un motor, [latency](../features/latency.md#check-maker-órdenes-límite-reales-motor-e)):
+  - `MakerProbeState`: `available`, `reason`, `enabled`, `engine` (`a|c|d`), `done`, `max`, `restMs`, `minUsd`, `minShares`, `maxMarketUsd`, `currentSlug`, `spentUsd`, `position` (`up`/`down`: tokens).
+  - `MakerProbeSample` (ms desde el envío de cada petición): `signalId`, `engine`, `slug`, `action`, `side`, `signalTime`, `signalPrice`, `price` (orden maker), `size`, `time` (envío), `signMs`, `postMs`, `postStatus`, `orderStatus`, `orderId`, `userAckMs`, `bookMs`, `firstFillMs`, `filledShares`, `cancelMs`, `cancelStatus`, `userCancelMs`, `bookGoneMs`, `exchangePlaceMs`, `exchangeCancelMs`, `status` (`filled|partial|unfilled|rejected|skipped|error`), `error`.
+  - `POST /api/latency/maker` con `x-trading-password` y `MakerProbeRequest` `{ enabled, engine? }` → `{ state }` o `{ error, state? }` (401 contraseña incorrecta · 409 no disponible).
 - `LatencySample`: `time` (inicio de la ronda, reloj de Binance), `probes: { connect|edge|ping|book|auth|order: { ms: number | null, status: number | null, detail? (mensaje de Polymarket), error? (red) } }`, `prepMs` (preparar la orden: cuerpo + HMAC), `estimateMs` (`prepMs` + `order`, o `auth`, o `ping` si fallan; el precio sale del libro por WS).
 
 ## Canal `/ws/trading` (compras reales, motor A, C o D)

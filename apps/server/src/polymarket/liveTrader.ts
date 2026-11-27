@@ -4,7 +4,7 @@ import { OrderBuilder, OrderType, orderToJsonV2, Side, SignatureTypeV2 } from "@
 import { createWalletClient, http } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { polygon } from "viem/chains";
-import type { LiveEngine, LiveSizing, LiveTrade, LiveTradingState, PmMarket, PmSide, PmSignal } from "@updown/protocol";
+import type { LiveEngine, LiveSizing, LiveTrade, LiveTradingState, PmMarket, PmSide, PmSignal, UpstreamState } from "@updown/protocol";
 import { ClobH2 } from "./clobConnection.js";
 import { ReconnectingWs } from "./reconnectingWs.js";
 import { l2Headers, responseDetail, type ClobCreds } from "./latency.js";
@@ -128,6 +128,18 @@ const EMPTY_POS = (): Record<PmSide, { shares: number; costUsd: number }> => ({ 
 interface LiveTraderEvents {
   state: [LiveTradingState];
   trade: [LiveTrade];
+  /** cada evento crudo del canal de usuario (ordenes y trades propios), para el check maker */
+  user: [unknown];
+}
+
+/** Resultado crudo de una peticion al CLOB con sus tiempos (reloj de Binance) */
+export interface ClobCall {
+  status: number;
+  text: string;
+  /** ida y vuelta (ms) */
+  ms: number;
+  sentAt: number;
+  respondedAt: number;
 }
 
 export class LiveTrader extends EventEmitter<LiveTraderEvents> {
@@ -189,6 +201,7 @@ export class LiveTrader extends EventEmitter<LiveTraderEvents> {
         for (const ev of Array.isArray(m) ? m : [m]) {
           const hit = tradeEventMatch(ev);
           if (hit) this.onMatch(hit.orderId, hit.at);
+          this.emit("user", ev);
         }
       });
       this.user.on("state", () => this.emit("state", this.state()));
@@ -215,6 +228,41 @@ export class LiveTrader extends EventEmitter<LiveTraderEvents> {
       t.matchedAt = at;
       this.emit("trade", { ...t });
     }
+  }
+
+  /** Canal de usuario conectado (el check maker lo usa para medir la confirmacion) */
+  get userStream(): UpstreamState {
+    return this.user?.state ?? "connecting";
+  }
+
+  /**
+   * Orden LIMITE post-only (GTC) firmada en local y enviada por la conexion caliente: si fuera a ejecutarse al instante, Polymarket
+   * la rechaza. Solo la usa el check maker (makerProbe.ts). `signMs` = firma + cabeceras.
+   */
+  async postLimitOrder(token: string, side: "buy" | "sell", price: number, size: number): Promise<ClobCall & { signMs: number }> {
+    if (!this.builder || !this.h2) throw new Error(`firma no disponible: ${this.disabledReason ?? "sin clave"}`);
+    const t0 = performance.now();
+    const signed = await this.builder.buildOrder(
+      { tokenID: token, price, size, side: side === "buy" ? Side.BUY : Side.SELL },
+      { tickSize: String(this.c.tick) as never, negRisk: false },
+      2,
+    );
+    const body = JSON.stringify(orderToJsonV2(signed as never, this.c.creds.apiKey, OrderType.GTC, true));
+    const headers = { ...l2Headers(this.c.creds, "POST", "/order", body), "content-type": "application/json" };
+    const signMs = round(performance.now() - t0, 2);
+    const sentAt = this.now();
+    const r = await this.h2.request("POST", "/order", headers, body);
+    return { status: r.status, text: r.text, ms: round(r.ms, 1), sentAt, respondedAt: this.now(), signMs };
+  }
+
+  /** Cancela una orden (DELETE /order) por la conexion caliente. */
+  async cancelOrder(orderId: string): Promise<ClobCall> {
+    if (!this.h2) throw new Error(`firma no disponible: ${this.disabledReason ?? "sin clave"}`);
+    const body = JSON.stringify({ orderID: orderId });
+    const headers = { ...l2Headers(this.c.creds, "DELETE", "/order", body), "content-type": "application/json" };
+    const sentAt = this.now();
+    const r = await this.h2.request("DELETE", "/order", headers, body);
+    return { status: r.status, text: r.text, ms: round(r.ms, 1), sentAt, respondedAt: this.now() };
   }
 
   state(): LiveTradingState {

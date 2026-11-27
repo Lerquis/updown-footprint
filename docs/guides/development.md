@@ -48,6 +48,7 @@ Copiar `apps/*/.env.example` a `.env` / `.env.local` si se quiere cambiar la con
 | server | `PM_CLOB_URL`, `PM_LATENCY_INTERVAL_MS`, `PM_LATENCY_KEEPALIVE_MS`, `PM_LATENCY_HISTORY` | clob.polymarket.com, 15000, 5000, 40 | Medición de latencia al CLOB ([latency](../features/latency.md)) |
 | server | `PM_SIGNER_ADDRESS` | (vacío) | EOA que creó la API key (`POLY_ADDRESS`); sin ella la sonda autenticada responde 401. Solo en `.env.local` |
 | server | `PM_WALLET_PRIVATE_KEY`, `TRADING_PASSWORD` | (vacío) | Compras reales del motor A, C o D; sin ellas, desactivado. **Solo en `.env.local`** ([live-trading](../features/live-trading.md)) |
+| server | `PM_MAKER_CHECK_MAX`, `PM_MAKER_CHECK_REST_MS`, `PM_MAKER_CHECK_USD` | 30, 2000, 1 | Check maker: órdenes maker reales siguiendo a un motor (tope de órdenes, tiempo en el libro, importe mínimo en USDC; se activa en la web) ([latency](../features/latency.md)) |
 | server | `PM_LIVE_SCALE`, `PM_LIVE_MIN_USD`, `PM_LIVE_MAX_USD`, `PM_LIVE_MAX_MARKET_USD`, `PM_LIVE_SLIPPAGE` | 0.2, 1, 10, 40, 1 | Importe y tolerancia de las compras reales (1 = sin límite de precio) |
 | server | `PM_FUNDER_ADDRESS` | (vacío) | Proxy wallet de la cuenta: `maker` de la orden de prueba de latencia (firmada con ceros, nunca se ejecuta). Solo en `.env.local` |
 | server | `PM_TWAP_WS_URL` | wss://ws-live-v2.polymarket.com/ws | Endpoint PolyBolt |

@@ -47,6 +47,42 @@ Retraso de matching: algunos markets responden `status: "delayed"` y casan tras 
 
 `auth` y `order` necesitan `PM_SIGNER_ADDRESS` (EOA que creó la API key: **Signer Address** en polymarket.com → Settings → API keys). Sin ella responden 401 (`missing address header`). La UI lo avisa.
 
+## Check maker: órdenes límite reales (motor E)
+La sonda de arriba mide una orden que **compra al instante** (taker), que además Polymarket retiene antes de ejecutar. El [motor E](predictive-engines.md) usa órdenes **límite en reposo** (maker), que no casan al llegar y no pasan por esa retención. El check mide ese ciclo con **órdenes reales y pequeñas** que siguen las señales del motor elegido (A, C o D) y **se activa a mano**.
+
+**Cada señal del motor:**
+- **Compra:** compra post-only a **mejor bid + 1 tick**, primera de la fila en un nivel nuevo. Si el spread es de 1 tick, se une al mejor bid.
+  - Importe: **máx(1 USDC, 5 tokens)**. Polymarket exige 5 tokens; a 0,60 son 3 USDC.
+  - Se cancela a los **2 s** (`PM_MAKER_CHECK_REST_MS`) si no se llenó entera.
+  - Con el motor D, si el precio maker supera el límite de su señal, se omite.
+- **Venta:** lo mismo en el ask (mejor ask − 1 tick), con los tokens que el check compró en ese market (si hay al menos 5). Lo que no se vende lo liquida Polymarket al cierre.
+- Un lado con una orden en curso no recibe otra: esa señal se omite.
+
+**Qué mide** (desde el envío de cada petición):
+1. `signMs` (firma) y `postMs` (ida y vuelta de `POST /order`; `status` = `live` si quedó en el libro, o el motivo del rechazo, p. ej. post-only que cruzaría).
+2. `userAckMs`: evento `PLACEMENT` del canal de usuario. `exchangePlaceMs`: su marca de tiempo de Polymarket, solo si viene en ms; incluye el desfase entre relojes.
+3. `bookMs`: aparece en el **libro público**. Es aproximado: un `price_change` de su nivel con su tamaño, y en niveles con mucho movimiento puede confundirse.
+4. `firstFillMs` y `filledShares`: ejecuciones por el canal de usuario.
+   - Fuentes: `size_matched` de los eventos de orden y `matched_amount` de los `trade` donde la orden está entre los `maker_orders`.
+   - Cada trade se cuenta una vez, aunque llegue de nuevo como MINED/CONFIRMED.
+5. Si no se llenó entera: `cancelMs` (`DELETE /order`), `userCancelMs` (`CANCELLATION`) y `bookGoneMs` (desaparece del libro).
+   - Hasta `bookGoneMs` alguien podría ejecutarla: es el tiempo que importa para cancelar cuando la idea muere.
+6. `status`: `filled` · `partial` · `unfilled` · `rejected` · `skipped` (no se envió, con el motivo) · `error`.
+
+**Seguridad:**
+- Apagado por defecto y al reiniciar. Se activa en la web con la contraseña de trading (`POST /api/latency/maker` `{ enabled, engine }`, cabecera `x-trading-password`).
+- Se apaga solo tras `PM_MAKER_CHECK_MAX` (30) órdenes enviadas.
+- Solo el market en curso; tope de compras por market `PM_LIVE_MAX_MARKET_USD` (40).
+- Si una cancelación falla, reintenta. Si algo falla con una orden viva, la cancela o se apaga.
+- Al apagar el servidor, cancela las órdenes vivas.
+- Es independiente de las [compras reales](live-trading.md): si las dos están activas, cada una opera por su cuenta.
+
+Código: `polymarket/makerProbe.ts` (`MakerProbe`, funciones puras `makerPrice`, `makerSize`, `orderEvent`, `makerFill`, `parsePost`, `parseCancel`; prueba en `makerProbe.test.ts`).
+- Firma y cancela con `LiveTrader.postLimitOrder` (GTC post-only) y `LiveTrader.cancelOrder`, por su conexión HTTP/2 caliente.
+- Los eventos del canal de usuario llegan por `LiveTrader` (evento `user`).
+
+Web: `components/MakerProbeCard.tsx` en el panel de latencia, con interruptor, motor, gasto y tokens del market, medianas, órdenes ejecutadas y tabla por orden.
+
 ## Servidor
 - `apps/server/src/polymarket/clobConnection.ts`: `ClobH2` (conexión HTTP/2 persistente, reconexión inmediata, `ping()`).
 - `apps/server/src/polymarket/latency.ts`: `LatencyMonitor` (rondas por `ClobH2`, `connect` por HTTP/1.1 nuevo; keep-alive; historial de `PM_LATENCY_HISTORY` rondas), funciones puras `estimateOrderMs`, `l2Signature`, `l2Headers`, `buildProbeOrder`, `responseDetail` (prueba en `latency.test.ts`).

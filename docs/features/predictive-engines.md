@@ -79,7 +79,7 @@ Backtest con muestras de 1 s: cancelar rápido pasó de −26 % a cerca de 0 %. 
 [`/ws/polymarket`](../architecture/protocol.md#canal-wspolymarket-markets-btc-updown-5m) (`order`, `PmOrder`, campos nuevos de `PmSignal` y `PmPoint`) y [`/ws/engines`](../architecture/protocol.md#canal-wsengines-decisiones-de-los-motores-a-c-d-y-e).
 
 ## Límites y siguientes pasos
-- **E no envía órdenes reales.** Hace falta ver su papel en vivo durante cientos de markets antes de conectarlo (`POST /order` GTC post-only, `DELETE /order`, canal de usuario para las ejecuciones).
+- **E no envía órdenes reales.** Hace falta ver su papel en vivo durante cientos de markets antes de conectarlo (`POST /order` GTC post-only, `DELETE /order`, canal de usuario para las ejecuciones). Primero se miden los tiempos reales de colocar y cancelar con la [check maker](latency.md#check-maker-órdenes-límite-reales-motor-e), y con ellos se ajustan `PM_PAPER_POST_LATENCY_MS` y `PM_PAPER_CANCEL_LATENCY_MS` del papel.
 - Sin datos sub-segundo de Polymarket guardados, D y E no tienen replay fiel. Las muestras de 1 s solo sirven para aproximar.
 - Recalibrar (`npm run calibrate`) y revisar `PM_D_MIN_EDGE` y `PM_DRIFT_GAIN` cuando haya varios días más de datos.
 - El papel de E supone que nuestras órdenes no mueven a los demás y que no hay cancelaciones por delante salvo lo que muestra el nivel.

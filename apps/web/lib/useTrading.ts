@@ -4,7 +4,7 @@ import { useCallback, useState } from "react";
 import { CHANNELS, type LiveEngine, type LiveSizing, type LiveTrade, type LiveTradingState, type TradingArmRequest, type TradingServerMessage } from "@updown/protocol";
 import { HTTP_BASE, useWsChannel, type LinkState } from "./useWsChannel";
 
-const PASS_KEY = "updown.tradingPassword";
+export const PASS_KEY = "updown.tradingPassword";
 
 export interface TradingView {
   link: LinkState;

@@ -8,6 +8,7 @@ import {
   type DepthServerMessage,
   type EnginesServerMessage,
   type LatencyServerMessage,
+  type MakerProbeRequest,
   type TradingArmRequest,
   type TradingServerMessage,
   type OrderflowServerMessage,
@@ -46,6 +47,7 @@ import { PmFeed, scheduleEngine, TimedEngine } from "./polymarket/timedEngine.js
 import { slotStart } from "./polymarket/tracker.js";
 import { LatencyMonitor } from "./polymarket/latency.js";
 import { LiveTrader } from "./polymarket/liveTrader.js";
+import { MakerProbe } from "./polymarket/makerProbe.js";
 
 const SYMBOL = config.symbol.toUpperCase();
 
@@ -280,18 +282,6 @@ const latencyMonitor = new LatencyMonitor(
   () => clock.now(),
 );
 if (!latencyMonitor.authReady) console.log("[latency] sin PM_SIGNER_ADDRESS o credenciales CLOB: la medida autenticada respondera 401 (la latencia del gateway sigue siendo valida)");
-const latency = new Channel<LatencyServerMessage>(() => ({
-  type: "snapshot",
-  intervalMs: config.pmLatencyIntervalMs,
-  target: new URL(config.pmClobUrl).host,
-  region: config.region,
-  transport: "h2",
-  authReady: latencyMonitor.authReady,
-  history: latencyMonitor.history.slice(),
-  historyMax: config.pmLatencyHistory,
-  upstream: latencyMonitor.state,
-}));
-latencyMonitor.on("sample", (sample) => latency.broadcast({ type: "sample", sample }));
 
 // Compras reales siguiendo al motor A, C o D: solo con el interruptor de la web activado y solo en el market en curso
 const liveTrader = new LiveTrader(
@@ -306,6 +296,33 @@ console.log(`[live] compras reales: ${liveTrader.enabled ? "disponibles (interru
 const trading = new Channel<TradingServerMessage>(() => ({ type: "snapshot", state: liveTrader.state(), trades: liveTrader.trades.slice() }));
 liveTrader.on("state", (state) => trading.broadcast({ type: "state", state }));
 liveTrader.on("trade", (trade) => trading.broadcast({ type: "trade", trade }));
+
+// Check maker: ordenes maker reales (las del motor E) siguiendo al motor A, C o D, solo con el interruptor
+const makerProbe = new MakerProbe(config.makerProbe, {
+  trader: liveTrader,
+  quote: (token) => {
+    const b = fastRunner.books.has(token) ? fastRunner.books.get(token) : null;
+    const q = b && b.time > 0 ? { bid: b.bestBid(), ask: b.bestAsk() } : feed.quote(token, Infinity);
+    return { bid: q?.bid ?? null, ask: q?.ask ?? null };
+  },
+  levelSize: (token, side, price) => (fastRunner.books.has(token) ? fastRunner.books.get(token).sizeAt(side, price) : 0),
+  now: () => clock.now(),
+});
+const latency = new Channel<LatencyServerMessage>(() => ({
+  type: "snapshot",
+  intervalMs: config.pmLatencyIntervalMs,
+  target: new URL(config.pmClobUrl).host,
+  region: config.region,
+  transport: "h2",
+  authReady: latencyMonitor.authReady,
+  history: latencyMonitor.history.slice(),
+  historyMax: config.pmLatencyHistory,
+  upstream: latencyMonitor.state,
+  maker: { state: makerProbe.state(), history: makerProbe.history.slice() },
+}));
+latencyMonitor.on("sample", (sample) => latency.broadcast({ type: "sample", sample }));
+makerProbe.on("sample", (sample) => latency.broadcast({ type: "makerSample", sample }));
+makerProbe.on("state", (state) => latency.broadcast({ type: "makerState", state }));
 latencyMonitor.on("state", (upstream) => latency.broadcast({ type: "status", upstream }));
 
 // ── Tuberia de trades: relleno historico + vivo, sin duplicados ──
@@ -342,12 +359,18 @@ chainlink.on("price", (p) => feed.onChainlink(p.time, p.value));
 tracker.on("quote", (q) => feed.onQuote(q.token, q.bid, q.ask, q.time ?? clock.now()));
 // libro completo y trades de Polymarket -> motores D y E (y su papel)
 tracker.on("book", (b) => fastRunner.onBook(b.token, b.bids, b.asks, b.time ?? clock.now()));
-tracker.on("level", (l) => fastRunner.onLevel(l.token, l.side, l.price, l.size, l.time ?? clock.now(), clock.now()));
+tracker.on("level", (l) => {
+  fastRunner.onLevel(l.token, l.side, l.price, l.size, l.time ?? clock.now(), clock.now());
+  makerProbe.onLevel(l.token, l.side, l.price, l.size);
+});
 tracker.on("trade", (t) => fastRunner.onTrade(t, clock.now()));
 for (const id of TIMED_IDS) {
   engines3[id].on("step", (st) => {
     tracker.addStep(id, st.slug, st.point, st.signals);
-    if (st.signals.length) liveTrader.onSignals(id, st.signals, tracker.current);
+    if (st.signals.length) {
+      liveTrader.onSignals(id, st.signals, tracker.current);
+      makerProbe.onSignals(id, st.signals, tracker.current);
+    }
     engines.broadcast({ type: "decision", engine: id, slug: st.slug, decision: st.decision });
   });
 }
@@ -358,12 +381,16 @@ fastRunner.on("step", (st) => {
 fastRunner.on("fills", (id, slug, signals) => tracker.addSignals(id, slug, signals));
 fastRunner.on("order", (slug, order) => tracker.addOrder(slug, order));
 // el motor D envia sus ordenes al decidir (no tras la ejecucion en papel): las compras reales las siguen si se elige D
-fastRunner.on("intent", (signals) => liveTrader.onSignals("d", signals, tracker.current));
+fastRunner.on("intent", (signals) => {
+  liveTrader.onSignals("d", signals, tracker.current);
+  makerProbe.onSignals("d", signals, tracker.current);
+});
 const pmStatus = () => polymarket.broadcast({ type: "status", upstream: pmUpstream() });
 tracker.on("status", pmStatus);
 chainlink.on("state", pmStatus);
 tracker.on("markets", (current, next) => {
   liveTrader.onMarket(current);
+  makerProbe.onMarket(current);
   if (ready) polymarket.broadcast({ type: "markets", current, next });
 });
 tracker.on("point", (engine, point) => ready && polymarket.broadcast({ type: "point", engine, point }));
@@ -492,6 +519,42 @@ const http = createServer((req, res) => {
     });
     return;
   }
+  // Check maker (ordenes maker reales siguiendo a un motor). Misma contrasena que las compras reales.
+  if (url.pathname === "/api/latency/maker") {
+    const cors = {
+      "access-control-allow-origin": config.allowedOrigin || "*",
+      "access-control-allow-methods": "POST, OPTIONS",
+      "access-control-allow-headers": "content-type, x-trading-password",
+    };
+    if (req.method === "OPTIONS") return void res.writeHead(204, cors).end();
+    if (req.method !== "POST") return void res.writeHead(405, cors).end();
+    let raw = "";
+    req.setEncoding("utf8");
+    req.on("data", (d: string) => {
+      raw += d;
+      if (raw.length > 1024) req.destroy();
+    });
+    req.on("end", () => {
+      const reply = (status: number, body: unknown) => {
+        res.writeHead(status, { ...cors, "content-type": "application/json" });
+        res.end(JSON.stringify(body));
+      };
+      const pass = req.headers["x-trading-password"];
+      if (!liveTrader.checkPassword(typeof pass === "string" ? pass : undefined)) {
+        console.warn("[maker-probe] contrasena incorrecta en /api/latency/maker");
+        return void setTimeout(() => reply(401, { error: "contrasena incorrecta" }), 800);
+      }
+      let body: MakerProbeRequest;
+      try {
+        body = JSON.parse(raw) as MakerProbeRequest;
+      } catch {
+        return reply(400, { error: "cuerpo invalido" });
+      }
+      const err = makerProbe.setEnabled(body.enabled === true, body.engine);
+      reply(err ? 409 : 200, err ? { error: err, state: makerProbe.state() } : { state: makerProbe.state() });
+    });
+    return;
+  }
   if (url.pathname === "/api/markets" && req.method === "GET") {
     // resumen de todos los markets guardados (sin points/barras): ?limit=&from=&to=&order=asc|desc
     const q = url.searchParams;
@@ -568,6 +631,7 @@ http.listen(config.port, async () => {
   chainlink.start();
   latencyMonitor.start();
   liveTrader.onMarket(tracker.current);
+  makerProbe.onMarket(tracker.current);
   liveTrader.start();
 
   if (config.backfill) {
@@ -617,6 +681,7 @@ const shutdown = async (signal: string) => {
   step("depth", () => depthClient.stop());
   step("chainlink", () => chainlink.stop());
   step("latency", () => latencyMonitor.stop());
+  await makerProbe.stop().catch(() => undefined);
   step("live", () => liveTrader.stop());
   step("tracker", () => tracker.stop());
   step("backup timer", () => dbBackup?.stop());
