@@ -99,6 +99,8 @@ export class DbBackup {
   private readonly s3: S3Lite;
   private timer: ReturnType<typeof setInterval> | undefined;
   private current: Promise<{ key: string; bytes: number; markets: number }> | null = null;
+  /** ultimo fallo (se muestra en /health para no depender de los logs) */
+  lastError: { at: string; message: string } | null = null;
   /** archivo en el mismo volumen que la base con la fecha del ultimo backup correcto */
   private readonly stampFile: string;
   private readonly tmpDir: string;
@@ -131,7 +133,16 @@ export class DbBackup {
 
   /** Hace un backup ahora (si ya hay uno en curso, devuelve ese): snapshot → gzip → subida → puntero → retencion. */
   run(): Promise<{ key: string; bytes: number; markets: number }> {
-    this.current ??= this.doRun().finally(() => (this.current = null));
+    this.current ??= this.doRun()
+      .then((r) => {
+        this.lastError = null;
+        return r;
+      })
+      .catch((e: unknown) => {
+        this.lastError = { at: new Date().toISOString(), message: e instanceof Error ? e.message : String(e) };
+        throw e;
+      })
+      .finally(() => (this.current = null));
     return this.current;
   }
 

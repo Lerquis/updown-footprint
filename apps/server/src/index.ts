@@ -104,7 +104,14 @@ const dbInfo = () => {
     sizeMb,
     onVolume: dbOnVolume,
     backup: dbBackup
-      ? { enabled: bk.enabled, intervalH: bk.intervalMs / 3600_000, keepH: bk.keepHours, last: dbBackup.lastBackup() ? new Date(dbBackup.lastBackup()).toISOString() : null }
+      ? {
+          enabled: bk.enabled,
+          intervalH: bk.intervalMs / 3600_000,
+          keepH: bk.keepHours,
+          last: dbBackup.lastBackup() ? new Date(dbBackup.lastBackup()).toISOString() : null,
+          running: dbBackup.running,
+          lastError: dbBackup.lastError,
+        }
       : null,
   };
 };
