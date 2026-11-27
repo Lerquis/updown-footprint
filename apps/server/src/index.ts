@@ -444,35 +444,50 @@ http.listen(config.port, async () => {
 });
 
 let shuttingDown = false;
-const shutdown = async () => {
+/** un paso del apagado que no puede impedir los siguientes */
+const step = (name: string, fn: () => void) => {
+  try {
+    fn();
+  } catch (e) {
+    console.error(`[shutdown] ${name}: ${e instanceof Error ? e.message : e}`);
+  }
+};
+const shutdown = async (signal: string) => {
   if (shuttingDown) return;
   shuttingDown = true;
-  clearInterval(depthSampler);
-  clearInterval(flowSampler);
-  for (const stop of stopEngines) stop();
-  upstream.stop();
-  depthClient.stop();
-  chainlink.stop();
-  latencyMonitor.stop();
-  tracker.stop();
-  dbBackup?.stop();
-  marketStore.flush();
-  // backup final antes de cada deploy/reinicio: si el volumen se pierde, R2 tiene la base hasta este instante (ADR 0013)
+  console.log(`[shutdown] ${signal} recibido`);
+  // 1) backup final PRIMERO, con todo aun en marcha (VACUUM INTO da una copia consistente): nada de lo que se para despues puede impedirlo (ADR 0013)
   if (dbBackup && bk.enabled) {
+    step("flush", () => marketStore.flush());
     console.log("[backup] backup final antes de apagar…");
-    const timeout = new Promise<void>((r) => setTimeout(r, bk.shutdownTimeoutMs).unref());
-    await Promise.race([
-      dbBackup.run().then(
-        (r) => console.log(`[backup] final ok: ${r.key} (${r.markets} markets)`),
-        (e) => console.error(`[backup] final fallo: ${e instanceof Error ? e.message : e}`),
-      ),
-      timeout.then(() => console.error(`[backup] final sin terminar tras ${bk.shutdownTimeoutMs / 1000}s`)),
-    ]);
+    try {
+      const timeout = new Promise<"timeout">((r) => setTimeout(() => r("timeout"), bk.shutdownTimeoutMs));
+      const r = await Promise.race([dbBackup.run(), timeout]);
+      if (r === "timeout") console.error(`[backup] final sin terminar tras ${bk.shutdownTimeoutMs / 1000}s`);
+      else console.log(`[backup] final ok: ${r.key} (${r.markets} markets)`);
+    } catch (e) {
+      console.error(`[backup] final fallo: ${e instanceof Error ? e.message : e}`);
+    }
   }
-  marketStore.close();
+  // 2) parar todo
+  step("timers", () => {
+    clearInterval(depthSampler);
+    clearInterval(flowSampler);
+  });
+  for (const stop of stopEngines) step("engine", stop);
+  step("binance", () => upstream.stop());
+  step("depth", () => depthClient.stop());
+  step("chainlink", () => chainlink.stop());
+  step("latency", () => latencyMonitor.stop());
+  step("tracker", () => tracker.stop());
+  step("backup timer", () => dbBackup?.stop());
+  step("db flush", () => marketStore.flush());
+  step("db close", () => marketStore.close());
+  console.log("[shutdown] listo");
   http.close(() => process.exit(0));
   // los WS abiertos mantienen vivo el servidor HTTP: la base ya esta cerrada, salir igualmente
   setTimeout(() => process.exit(0), 3000).unref();
 };
-process.on("SIGINT", () => void shutdown());
-process.on("SIGTERM", () => void shutdown());
+process.on("SIGINT", () => void shutdown("SIGINT"));
+process.on("SIGTERM", () => void shutdown("SIGTERM"));
+process.on("unhandledRejection", (e) => console.error(`[server] promesa rechazada sin manejar: ${e instanceof Error ? e.stack : e}`));
