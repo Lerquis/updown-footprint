@@ -1,6 +1,6 @@
 # 0017 — Predict.fun con los mismos motores (precio puntual, sin TWAP)
 
-- **Estado**: aceptada · 2026-11-27
+- **Estado**: aceptada · 2026-11-27 · **desactivada** el mismo día (código comentado, ver [predict-markets](../features/predict-markets.md))
 
 ## Contexto
 Además de Polymarket se quiere seguir **Predict.fun** (BNB Chain). Tiene la misma serie BTC Up/Down de 5 minutos, con el mismo formato de slug. Las diferencias:

@@ -14,7 +14,7 @@
 | Replays del motor A con ejecución retrasada (0–3 s), página `/replays` | Implementada | [replays.md](replays.md) |
 | Compras reales del motor A, C o D (interruptor por market y por fuente, proporcional o mínimo) | Implementada | [live-trading.md](live-trading.md) |
 | Fuente futures (perpetuo USDⓈ-M) en paralelo a spot + comparativa `/compare` | Implementada | [futures-source.md](futures-source.md) |
-| Predict.fun BTC Up/Down 5m con los motores A, C, D y E (precio puntual, sin TWAP), mismo panel que Polymarket | Implementada (papel, sin compras reales) | [predict-markets.md](predict-markets.md) |
+| Predict.fun BTC Up/Down 5m con los motores A, C, D y E (precio puntual, sin TWAP), mismo panel que Polymarket | **Desactivada** (código comentado, 2026-11-27) | [predict-markets.md](predict-markets.md) |
 
 ## Formato de un feature doc
 `# Nombre` · **Estado** · **Objetivo** · **Servidor** (archivos/flujo) · **Frontend** (archivos) · **Protocolo** (enlace a `protocol.md`) · **Pendiente / ideas**.

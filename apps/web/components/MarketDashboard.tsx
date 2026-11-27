@@ -2,7 +2,8 @@
 
 import Link from "next/link";
 import { useRef, useState } from "react";
-import { CHANNELS, SOURCES, type MarketSource } from "@updown/protocol";
+// [PREDICT desactivado] import { CHANNELS, SOURCES, type MarketSource } from "@updown/protocol";
+import { SOURCES, type MarketSource } from "@updown/protocol";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
@@ -63,8 +64,9 @@ function MarketDashboard({ onSourceChange }: { onSourceChange: (s: MarketSource)
   const flow = useOrderflow();
   const pm = usePolymarket();
   const lat = useLatency();
-  const pf = usePolymarket(CHANNELS.predict);
-  const pfLat = useLatency(CHANNELS.predictLatency);
+  // [PREDICT desactivado] Predict esta comentado entero (ADR 0017): sin estos hooks no se abre ningun WS de Predict.
+  // [PREDICT desactivado] const pf = usePolymarket(CHANNELS.predict);
+  // [PREDICT desactivado] const pfLat = useLatency(CHANNELS.predictLatency);
 
   // Vista (zoom/desplazamiento) compartida por la grafica de precio y la de CVD; vive fuera de React.
   const viewRef = useRef<ChartView | null>(null);
@@ -182,8 +184,8 @@ function MarketDashboard({ onSourceChange }: { onSourceChange: (s: MarketSource)
 
       <LatencyPanel lat={lat} />
       <PolymarketPanel pm={pm} flow={flow} />
-      <LatencyPanel lat={pfLat} venue="predict" />
-      <PolymarketPanel pm={pf} flow={flow} venue="predict" />
+      {/* [PREDICT desactivado] <LatencyPanel lat={pfLat} venue="predict" /> */}
+      {/* [PREDICT desactivado] <PolymarketPanel pm={pf} flow={flow} venue="predict" /> */}
       <FootprintPanel bars={flow.bars} signals={flow.signals} />
 
       <Card className="gap-0 py-0">
