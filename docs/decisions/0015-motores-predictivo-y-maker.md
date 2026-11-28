@@ -1,6 +1,6 @@
 # 0015 — Motores D (predictivo) y E (maker); se elimina el motor B
 
-- **Estado**: aceptada · 2026-11-27
+- **Estado**: sustituida por [ADR 0020](0020-eliminar-motores-d-y-e.md) (2026-11-28: se eliminan D y E; la eliminación de B sigue) · aceptada 2026-11-27
 
 ## Contexto
 - Las compras reales (ADR 0014) mostraron que una orden tarda 1–5 s en registrarse en Polymarket. Los replays del motor A confirman que su ventaja desaparece con ese retraso: +421 USDC ejecutando al instante, +26 con 1 s, −91 con 2 s.

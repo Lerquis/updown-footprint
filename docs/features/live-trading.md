@@ -1,4 +1,4 @@
-# Compras reales (motor A, C o D)
+# Compras reales (motor A o C)
 
 **Estado**: Implementada (requiere `PM_WALLET_PRIVATE_KEY` y `TRADING_PASSWORD` en el servidor).
 
@@ -7,18 +7,18 @@
 ## Reglas
 | Regla | Valor |
 |---|---|
-| Quién dispara | Las señales del motor elegido al activar: **A** (T + 0, lo antes posible), **C** (T + 150 ms, por defecto) o **D** (predictivo, cada 100 ms; [predictive-engines](predictive-engines.md)) |
+| Quién dispara | Las señales del motor elegido al activar: **A** (T + 0, lo antes posible) o **C** (T + 150 ms, por defecto) |
 | Cuándo | Solo con el interruptor activado, solo en el **market en curso**. Se apaga solo al cambiar de market y al reiniciar el servidor |
 | Fuente | Hay un interruptor **por fuente** (spot y futures, [futures-source](futures-source.md)), cada uno sigue a los motores de su fuente. Misma contraseña y misma cartera; el tope por market es de cada fuente, así que con las dos activadas la exposición máxima se duplica |
 | Importe de compra | **Proporcional:** paper ÷ 5 (`PM_LIVE_SCALE` 0.2), es decir, paper 5..50 → **1..10 USDC** (`PM_LIVE_MIN_USD`/`MAX_USD`). **Mínimo:** lo menos que acepta Polymarket y se puede vender después, `max(1 USDC, 5 tokens × precio de la señal)`. Se elige al activar |
 | Mínimo de Polymarket | Se sube a `max(1 USDC, 5 tokens × precio de la señal)` para poder venderlo después. Si no cabe en 10 USDC o en el tope del market, se omite |
 | Tope por market | 40 USDC en compras (`PM_LIVE_MAX_MARKET_USD`) |
 | Venta | Vende **todos** los tokens reales de ese lado (de las ejecuciones). Sin tokens reales: omitida |
-| Orden | **FAK** (llena lo que puede al instante y cancela el resto). **A y C: sin límite de precio por defecto** (`PM_LIVE_SLIPPAGE` 1): compra hasta 0.99 y vende desde 0.01; lo que acota el riesgo es el importe en USDC. Con `PM_LIVE_SLIPPAGE=0.02` vuelve el límite señal ± 2¢, redondeado al tick 0.01. **D: el límite de su señal** (`PmSignal.limit`, el peor precio que aún deja 3¢ de EV) |
+| Orden | **FAK** (llena lo que puede al instante y cancela el resto). **A y C: sin límite de precio por defecto** (`PM_LIVE_SLIPPAGE` 1): compra hasta 0.99 y vende desde 0.01; lo que acota el riesgo es el importe en USDC. Con `PM_LIVE_SLIPPAGE=0.02` vuelve el límite señal ± 2¢, redondeado al tick 0.01. |
 | Fin del market | No se vende: Polymarket liquida los tokens ganadores (1 USDC) automáticamente |
 
 ## Flujo
-1. El motor elegido emite `PmSignal`: A y C en su paso (`engines3[id].on("step")`), D al decidir (`fastRunner.on("intent")`, antes de su ejecución en papel) → `liveTrader.onSignals`.
+1. El motor elegido emite `PmSignal`: A y C en su paso (`engines3[id].on("step")`) → `liveTrader.onSignals`.
 2. `LiveTrader` (`apps/server/src/polymarket/liveTrader.ts`) pone las órdenes en cola, en serie y en orden. Calcula el límite (`limitPriceFor`) y el importe (`realBuyUsd`).
 3. **Firma local** con `OrderBuilder` de `@polymarket/clob-client-v2` (EIP-712, `signatureType` 1 POLY_PROXY, maker = proxy wallet). Sin llamadas de red, ~5 ms.
 4. **Envío** por su propia conexión HTTP/2 caliente (`ClobH2`) con cabeceras L2 ([ADR 0012](../decisions/0012-conexion-http2-caliente-al-clob.md)).

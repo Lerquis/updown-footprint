@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import type { CvdPoint, FootprintBar, OrderflowSignal, PmEngineId, PmMarket, PmOrder, PmPoint, PmRecord, PmSecondaryEngineId, PmSignal, UpstreamState } from "@updown/protocol";
+import type { CvdPoint, FootprintBar, OrderflowSignal, PmEngineId, PmMarket, PmPoint, PmRecord, PmSecondaryEngineId, PmSignal, UpstreamState } from "@updown/protocol";
 import type { Level, PmTrade } from "./pmBook.js";
 import type { PolymarketApi } from "./api.js";
 import { computePnl } from "./strategy.js";
@@ -66,16 +66,15 @@ export interface TrackerOptions {
   tag?: string;
 }
 
-/** Muestras, senales y (motor E) ordenes de un motor en un market */
+/** Muestras y senales de un motor en un market */
 export interface EngineTrack {
   points: PmPoint[];
   trades: PmSignal[];
-  orders?: PmOrder[];
 }
 export type EngineTracks = Record<PmEngineId, EngineTrack>;
-export const ENGINE_TRACK_IDS: PmEngineId[] = ["a", "c", "d", "e"];
-const SECONDARY: PmSecondaryEngineId[] = ["c", "d", "e"];
-const emptyTracks = (): EngineTracks => ({ a: { points: [], trades: [] }, c: { points: [], trades: [] }, d: { points: [], trades: [] }, e: { points: [], trades: [], orders: [] } });
+export const ENGINE_TRACK_IDS: PmEngineId[] = ["a", "c"];
+const SECONDARY: PmSecondaryEngineId[] = ["c"];
+const emptyTracks = (): EngineTracks => ({ a: { points: [], trades: [] }, c: { points: [], trades: [] } });
 
 export interface TrackerEvents {
   /** cambio en current/next */
@@ -84,11 +83,9 @@ export interface TrackerEvents {
   point: [PmEngineId, PmPoint];
   /** senal de compra/venta de un motor */
   signal: [PmEngineId, PmSignal];
-  /** orden en reposo del motor E nueva o actualizada */
-  order: [PmOrder];
   /** cotizacion recibida del libro del market en curso (para los motores) */
   quote: [BookQuote];
-  /** libro completo, cambio de nivel y trade de los tokens del market en curso (motores D y E) */
+  /** libro completo, cambio de nivel y trade de los tokens del market en curso (libro L2 para el check maker) */
   book: [BookSnapshot];
   level: [BookLevel];
   trade: [PmTrade];
@@ -117,11 +114,11 @@ export function isComplete(market: PmMarket, points: PmPoint[], maxGapMs = 3000,
 
 /**
  * Empaqueta lo ocurrido en la ventana [start, end) del market: flujo de Binance y lo de cada motor
- * (A en `points`/`trades`, C, D y E en `engines`). La completitud se mide con las muestras de A. Funcion pura.
+ * (A en `points`/`trades`, C en `engines`). La completitud se mide con las muestras de A. Funcion pura.
  */
 export function buildRecord(market: PmMarket, tracks: EngineTracks, flow: FlowSource): PmRecord {
   const { start, end } = market;
-  const run = (t: EngineTrack) => ({ points: t.points.slice(), trades: t.trades.slice(), pnl: computePnl(t.trades, market.result), ...(t.orders ? { orders: t.orders.slice() } : {}) });
+  const run = (t: EngineTrack) => ({ points: t.points.slice(), trades: t.trades.slice(), pnl: computePnl(t.trades, market.result) });
   return {
     market: { ...market },
     points: tracks.a.points.slice(),
@@ -137,7 +134,7 @@ export function buildRecord(market: PmMarket, tracks: EngineTracks, flow: FlowSo
 
 /**
  * Sigue el market BTC Up/Down en curso (rota solo cada `marketMs`), mantiene el libro de sus tokens, recoge lo
- * que producen los motores (A, C, D, E: `addStep`, y las ordenes de E: `addOrder`) y archiva en memoria cada market terminado junto al flujo de Binance.
+ * que producen los motores (A y C: `addStep`) y archiva en memoria cada market terminado junto al flujo de Binance.
  * Se mueve con `tick()` (1 Hz). Los tiempos vienen del reloj de Binance (`now`).
  */
 export class PolymarketTracker extends EventEmitter<TrackerEvents> {
@@ -179,25 +176,6 @@ export class PolymarketTracker extends EventEmitter<TrackerEvents> {
   /** Muestras y senales de un motor en el market en curso */
   live(id: PmEngineId): EngineTrack {
     return this.current ? this.track(this.current.slug)[id] : { points: [], trades: [] };
-  }
-
-  /** Operaciones de un motor fuera de su paso de 1 s (ejecuciones en papel de D y E, que llegan tras su latencia). */
-  addSignals(id: PmEngineId, slug: string, signals: PmSignal[]): void {
-    const t = this.track(slug)[id];
-    for (const sig of signals) {
-      t.trades.push(sig);
-      this.emit("signal", id, sig);
-    }
-  }
-
-  /** Orden del motor E nueva o actualizada en el market `slug` (upsert por id). */
-  addOrder(slug: string, order: PmOrder): void {
-    const t = this.track(slug).e;
-    const list = (t.orders ??= []);
-    const i = list.findIndex((o) => o.id === order.id);
-    if (i >= 0) list[i] = order;
-    else list.push(order);
-    this.emit("order", order);
   }
 
   /** Registra el paso de un motor (su muestra y sus senales) en el market `slug`. */

@@ -50,7 +50,7 @@ Para no empezar de cero, se sube la base local al bucket y Railway la descarga a
 | Variable | Valor |
 |---|---|
 | `PM_CLOB_API_KEY`, `PM_CLOB_SECRET`, `PM_CLOB_PASSPHRASE` | Las de `.env.local` (TWAP de Chainlink y latencia) |
-| `PM_WALLET_PRIVATE_KEY`, `TRADING_PASSWORD` | Compras reales del motor A, C o D, con un interruptor en cada fuente (spot y futures) ([live-trading](../features/live-trading.md)): clave privada de la EOA firmante y contraseña del interruptor. Sin ellas, desactivado |
+| `PM_WALLET_PRIVATE_KEY`, `TRADING_PASSWORD` | Compras reales del motor A o C, con un interruptor en cada fuente (spot y futures) ([live-trading](../features/live-trading.md)): clave privada de la EOA firmante y contraseña del interruptor. Sin ellas, desactivado |
 | `PM_SIGNER_ADDRESS`, `PM_FUNDER_ADDRESS` | Las de `.env.local`: signer y proxy wallet para la medida de latencia ([latency](../features/latency.md)). Sin ellas la orden de prueba responde 401 |
 | `ALLOWED_ORIGIN` | URL del frontend, p. ej. `https://updown.vercel.app` (vacío = cualquier origen) |
 | `BACKUP_S3_ENDPOINT` | `https://<account_id>.r2.cloudflarestorage.com` |
@@ -78,6 +78,7 @@ Para no empezar de cero, se sube la base local al bucket y Railway la descarga a
   - Su base `/data/polymarket-futures-v2.db` va en el mismo volumen, con backups propios en `updown-futures/v2/` y restauración automática igual que spot.
   - `/health` → `futures.db` muestra su tamaño, si está en el volumen y su último backup.
   - Futures guarda más aggTrades que spot: **el volumen se llena antes**. Al apagar, los dos backups finales van a la vez y necesitan espacio temporal para las dos copias.
+- **ETH** ([ADR 0018](../decisions/0018-eth-como-segundo-activo.md)): bases `/data/polymarket-eth-v2.db` y `/data/polymarket-eth-futures-v2.db` en el mismo volumen, backups en `updown-eth/v2/` y `updown-eth-futures/v2/`, misma restauración. `/health` → `eth.spot.db` y `eth.futures.db`. Son dos bases más: vigilar el volumen y el espacio temporal de los backups finales (van todos a la vez). `ETH_ENABLED=false` lo apaga.
 - **Desastre** (volumen borrado): crear volumen nuevo en `/data` con `PM_DB_RESTORE=true` → arranca desde la última copia.
 
 ## Variables de backup

@@ -25,6 +25,12 @@ Copiar `apps/*/.env.example` a `.env` / `.env.local` si se quiere cambiar la con
 | server | `FUTURES_DEPTH_SNAPSHOT_LIMIT` | 1000 | Niveles del snapshot del libro de futuros (máximo 1000) |
 | server | `FUTURES_BACKFILL_DELAY_MS` | 600 | Pausa entre páginas del relleno de futuros (rate limit) |
 | server | `FUTURES_DB_PATH` | junto a `PM_DB_PATH`: `polymarket-futures.db` | Base de futures (con la generación: `polymarket-futures-v2.db`) |
+| server | `ETH_ENABLED` | true | ETH como segundo activo ([eth-asset](../features/eth-asset.md)); `FUTURES_ENABLED` vale para los dos |
+| server | `ETH_SYMBOL`, `ETH_PM_SYMBOL`, `ETH_PM_SLUG_PREFIX` | ethusdt, ETH, eth-updown-5m | Símbolo de Binance, símbolo de crypto-price y prefijo del slug de Polymarket |
+| server | `ETH_CHAINLINK_TWAP_SYMBOL`, `ETH_CHAINLINK_SYMBOL` | ethusd, eth/usd | Chainlink ETH/USD: TWAP (con credenciales CLOB) o spot del RTDS |
+| server | `ETH_DEPTH_STEP`, `ETH_FOOTPRINT_TICK`, `ETH_IMBALANCE_MIN_VOL` | 0.05, 0.05, 1.5 | Equivalentes en ETH de `DEPTH_STEP`, `FOOTPRINT_TICK` e `IMBALANCE_MIN_VOL` |
+| server | `ETH_STRENGTH` | true | SS: movimientos con fuerza del motor C con BTC de referencia ([sol-strength](../features/sol-strength.md)) |
+| server | `ETH_DB_PATH`, `ETH_FUTURES_DB_PATH` | junto a `PM_DB_PATH`: `polymarket-eth.db`, `polymarket-eth-futures.db` | Bases de ETH (con la generación: `polymarket-eth-v2.db`) |
 | server | `RETENTION_MS` | 900000 | **Memoria** de trades, heatmap y CVD (15 min). Ver ADR 0005 para cuánto cuesta subirla |
 | server | `TRADES_MAX` | 100000 | Tope de seguridad de trades en memoria |
 | server | `BACKFILL` | true | Rellenar la memoria por REST al arrancar |
@@ -45,10 +51,6 @@ Copiar `apps/*/.env.example` a `.env` / `.env.local` si se quiere cambiar la con
 | server | `PM_DB_PATH` | `data/polymarket.db` | SQLite: markets completos + todos los aggTrades y el heatmap (gitignored, crece sin límite). Se usa con la generación: `data/polymarket-v2.db`; la base sin sufijo es la generación anterior (se archiva una vez en R2, [ADR 0011](../decisions/0011-tres-motores-guardados-y-base-v2.md)) |
 | server | `PM_FEE_RATE`, `PM_SLIPPAGE`, `PM_MIN_EDGE`, `PM_EXIT_MARGIN`, `PM_BANKROLL`, `PM_KELLY_FRACTION`, `PM_MAX_STAKE_PCT`, `PM_MAX_MARKET_PCT`, `PM_MODEL_WEIGHT`, `PM_FLOW_GAIN`, `PM_WARMUP_S`, `PM_NO_ENTRY_S` | 0.05, 0.005, 0.04, 0.015, 1000, 0.25, 0.05, 0.1, 0.6, 0.3, 20, 10 | Parámetros del motor de señales (ver [signal-engine](../features/signal-engine.md)) |
 | server | `PM_ENGINE_A_DELAY_MS`, `PM_ENGINE_C_DELAY_MS` | 0, 150 | Retraso de los motores A y C tras cada segundo de Binance ([engines](../features/engines.md)) |
-| server | `PM_FAST_TICK_MS`, `PM_FAST_MODEL_WEIGHT`, `PM_FAST_MODEL_WEIGHT_END`, `PM_DRIFT_GAIN`, `PM_CALIBRATION_PATH` | 100, 0.6, 0.3, 3, data/calibration.json | Motores D y E: cada cuánto deciden, mezcla modelo/mercado (normal y últimos 30 s), multiplicador de la deriva y calibración ([predictive-engines](../features/predictive-engines.md)) |
-| server | `PM_D_MIN_EDGE`, `PM_D_LIMIT_MARGIN`, `PM_D_EXIT_MARGIN`, `PM_D_NO_ENTRY_S` | 0.1, 0.03, 0.03, 20 | Motor D (predictivo, taker) |
-| server | `PM_E_EDGE`, `PM_E_EXIT_EDGE`, `PM_E_NEED_DRIFT`, `PM_E_DROP_CANCEL`, `PM_E_STOP`, `PM_E_MIN_REST_MS`, `PM_E_NO_ENTRY_S` | 0.05, 0.04, 0.05, 0.01, 0.15, 500, 20 | Motor E (libro, maker) |
-| server | `PM_PAPER_TAKER_LATENCY_MS`, `PM_PAPER_POST_LATENCY_MS`, `PM_PAPER_CANCEL_LATENCY_MS` | 1500, 150, 100 | Papel realista de D y E: retraso de una orden taker, de la entrada al libro de una maker y de una cancelación |
 | server | `PM_LIVE_WS_URL`, `PM_BOOK_WS_URL`, `PM_GAMMA_URL`, `PM_SITE_URL` | URLs de Polymarket | Endpoints upstream |
 | server | `PM_TWAP_SECONDS` | 60 | Ventana del TWAP de Chainlink para price to beat y cierre |
 | server | `PM_CLOB_API_KEY`, `PM_CLOB_SECRET`, `PM_CLOB_PASSPHRASE` | (vacío) | Credenciales CLOB para el TWAP en vivo (PolyBolt). **Solo en `apps/server/.env.local`**; sin ellas se usa el spot del RTDS |
@@ -59,7 +61,7 @@ Copiar `apps/*/.env.example` a `.env` / `.env.local` si se quiere cambiar la con
 | server | `PREDICT_FEE_RATE`, `PREDICT_BASIS_SECONDS`, `PREDICT_DB_PATH`, `PREDICT_FUTURES_DB_PATH` | 0.02, 5, data/predict.db, data/predict-futures.db | Motores de Predict: comisión (rate·min(p,1−p)), ventana del basis contra el Chainlink puntual y bases (con la generación: `predict-v2.db`) |
 | server | `PM_CLOB_URL`, `PM_LATENCY_INTERVAL_MS`, `PM_LATENCY_KEEPALIVE_MS`, `PM_LATENCY_HISTORY` | clob.polymarket.com, 15000, 5000, 40 | Medición de latencia al CLOB ([latency](../features/latency.md)) |
 | server | `PM_SIGNER_ADDRESS` | (vacío) | EOA que creó la API key (`POLY_ADDRESS`); sin ella la sonda autenticada responde 401. Solo en `.env.local` |
-| server | `PM_WALLET_PRIVATE_KEY`, `TRADING_PASSWORD` | (vacío) | Compras reales del motor A, C o D; sin ellas, desactivado. **Solo en `.env.local`** ([live-trading](../features/live-trading.md)) |
+| server | `PM_WALLET_PRIVATE_KEY`, `TRADING_PASSWORD` | (vacío) | Compras reales del motor A o C; sin ellas, desactivado. **Solo en `.env.local`** ([live-trading](../features/live-trading.md)) |
 | server | `PM_MAKER_CHECK_MAX`, `PM_MAKER_CHECK_REST_MS`, `PM_MAKER_CHECK_USD` | 30, 2000, 1 | Check maker: órdenes maker reales siguiendo a un motor (tope de órdenes, tiempo en el libro, importe mínimo en USDC; se activa en la web) ([latency](../features/latency.md)) |
 | server | `PM_LIVE_SCALE`, `PM_LIVE_MIN_USD`, `PM_LIVE_MAX_USD`, `PM_LIVE_MAX_MARKET_USD`, `PM_LIVE_SLIPPAGE` | 0.2, 1, 10, 40, 1 | Importe y tolerancia de las compras reales (1 = sin límite de precio) |
 | server | `PM_FUNDER_ADDRESS` | (vacío) | Proxy wallet de la cuenta: `maker` de la orden de prueba de latencia (firmada con ceros, nunca se ejecuta). Solo en `.env.local` |

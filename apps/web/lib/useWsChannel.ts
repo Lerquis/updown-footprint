@@ -2,16 +2,17 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { sourcePath } from "@updown/protocol";
-import { useSource } from "./source";
+import { useAsset, useSource } from "./source";
 
 const WS_BASE = process.env.NEXT_PUBLIC_WS_URL ?? "ws://localhost:4000";
 /** Misma direccion del servidor para su API HTTP (`/api/...`) */
 export const HTTP_BASE = WS_BASE.replace(/^ws/, "http");
 
-/** URL de la API HTTP de la fuente que se esta viendo: `apiUrl("/api/markets")` -> `.../api/futures/markets` en futures */
+/** URL de la API HTTP del activo y la fuente que se estan viendo: `apiUrl("/api/markets")` -> `.../api/eth/futures/markets` en ETH futures */
 export function useApiUrl(): (path: string) => string {
   const source = useSource();
-  return useCallback((path: string) => `${HTTP_BASE}${sourcePath(source, path)}`, [source]);
+  const asset = useAsset();
+  return useCallback((path: string) => `${HTTP_BASE}${sourcePath(source, path, asset)}`, [source, asset]);
 }
 
 export type LinkState = "connecting" | "open" | "closed";
@@ -20,11 +21,12 @@ export type LinkState = "connecting" | "open" | "closed";
  * Conexion a un canal WS del servidor con reconexion exponencial.
  * `onMessage` puede cambiar entre renders sin reconectar. Devuelve el estado del enlace.
  * Con `path` null no se conecta (canales que solo se piden bajo demanda, p. ej. al abrir un panel).
- * `path` es la ruta de `CHANNELS`; se conecta a la de la fuente que se esta viendo (`useSource`).
+ * `path` es la ruta de `CHANNELS`; se conecta a la del activo y la fuente que se estan viendo (`useAsset`, `useSource`).
  */
 export function useWsChannel<T>(channel: string | null, onMessage: (msg: T) => void): LinkState {
   const source = useSource();
-  const path = channel === null ? null : sourcePath(source, channel);
+  const asset = useAsset();
+  const path = channel === null ? null : sourcePath(source, channel, asset);
   const [link, setLink] = useState<LinkState>("connecting");
   const handler = useRef(onMessage);
   handler.current = onMessage;

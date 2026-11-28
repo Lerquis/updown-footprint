@@ -15,9 +15,6 @@ export const BLOCK_LABEL: Record<PmBlock, string> = {
   cooldown: "espera",
   edge: "EV bajo",
   stake: "importe mínimo/tope",
-  pending: "esperando ejecución",
-  quoting: "orden en el libro",
-  drift: "flujo en contra",
 };
 
 export const BLOCK_HELP: Record<PmBlock, string> = {
@@ -34,9 +31,6 @@ export const BLOCK_HELP: Record<PmBlock, string> = {
   cooldown: "Espera tras la última señal de ese lado.",
   edge: "El valor esperado no supera el umbral.",
   stake: "El importe según Kelly es menor que el mínimo, o se agotó el tope por market.",
-  pending: "Motor D/E: la orden ya se envió y espera su ejecución (en papel, tras la latencia simulada).",
-  quoting: "Motor E: tiene una orden límite en reposo en el libro de ese lado.",
-  drift: "Motor E: el flujo de Binance no empuja a favor de ese lado (o la probabilidad acaba de caer): no deja orden de compra.",
 };
 
 export const cents = (v: number | null) => (v === null ? "–" : `${(v * 100).toFixed(0)}¢`);
@@ -67,14 +61,18 @@ export function paperNet(trades: PmSignal[], result: "up" | "down" | null): numb
   return Math.round((net + open[result]) * 100) / 100;
 }
 
-export const ENGINE_IDS: PmEngineId[] = ["a", "c", "d", "e"];
+export const ENGINE_IDS: PmEngineId[] = ["a", "c"];
 /** Motores con las mismas reglas (los que se comparan segundo a segundo) */
 export const SAME_RULES: PmEngineId[] = ["a", "c"];
 /** Nombre corto y descripcion de cada motor (retrasos por defecto; el servidor envia los reales por el canal engines) */
-export const ENGINE_LABEL: Record<PmEngineId, string> = { a: "Motor A", c: "Motor C", d: "Motor D", e: "Motor E" };
+export const ENGINE_LABEL: Record<PmEngineId, string> = { a: "Motor A", c: "Motor C" };
 export const ENGINE_DESC: Record<PmEngineId, string> = {
   a: "segundo exacto, lo último recibido",
   c: "segundo + 150 ms, datos a fecha",
-  d: "predictivo: cada 100 ms, deriva de Binance, límite; papel con latencia",
-  e: "libro: órdenes maker en reposo; papel con la cola real",
+};
+
+/** Variantes de SS (docs/features/sol-strength.md) */
+export const STRENGTH_LABEL: Record<import("@updown/protocol").PmStrengthVariant, string> = {
+  sol: "SS Solana (calibrado)",
+  base: "SS base (sin calibrar)",
 };

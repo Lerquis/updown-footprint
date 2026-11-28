@@ -10,7 +10,7 @@ import { ReconnectingWs } from "./reconnectingWs.js";
 import { l2Headers, responseDetail, type ClobCreds } from "./latency.js";
 
 /**
- * Compras/ventas REALES siguiendo al motor elegido, A, C o D (docs/features/live-trading.md). Solo actua si:
+ * Compras/ventas REALES siguiendo al motor elegido, A o C (docs/features/live-trading.md). Solo actua si:
  *  - hay clave privada y contrasena configuradas (si no, `enabled` es false y nunca firma nada),
  *  - el interruptor esta activado para el market en curso (se apaga solo al cambiar de market),
  *  - la senal es del motor elegido al activar y de ese mismo market.
@@ -288,7 +288,7 @@ export class LiveTrader extends EventEmitter<LiveTraderEvents> {
 
   /** Activa/desactiva para el market en curso (con el motor y el modo de importe elegidos). Devuelve un error legible o null. */
   setArmed(slug: string, armed: boolean, opts: { engine?: LiveEngine; sizing?: LiveSizing } = {}): string | null {
-    if (opts.engine === "a" || opts.engine === "c" || opts.engine === "d") this.engine = opts.engine;
+    if (opts.engine === "a" || opts.engine === "c") this.engine = opts.engine;
     if (opts.sizing === "scaled" || opts.sizing === "min") this.sizing = opts.sizing;
     if (!armed) {
       if (this.armedSlug) this.disarm("apagado por el usuario");
@@ -348,8 +348,7 @@ export class LiveTrader extends EventEmitter<LiveTraderEvents> {
   private async execute(s: PmSignal, market: PmMarket, engine: LiveEngine): Promise<void> {
     if (!this.builder || !this.h2 || this.armedSlug !== s.slug) return;
     const token = s.side === "up" ? market.upToken : market.downToken;
-    // el motor D trae su propio limite (el peor precio con EV positivo); A y C usan senal ± tolerancia
-    const limitPrice = s.limit !== undefined ? round(Math.min(1 - this.c.tick, Math.max(this.c.tick, s.limit)), 6) : limitPriceFor(s.action, s.price, this.c.slippage, this.c.tick);
+    const limitPrice = limitPriceFor(s.action, s.price, this.c.slippage, this.c.tick);
     const base: LiveTrade = {
       signalId: s.id,
       engine,

@@ -1,6 +1,6 @@
 "use client";
 
-import { SOURCE_LABEL, useSource } from "@/lib/source";
+import { ASSET_INFO, SOURCE_LABEL, useAsset, useSource } from "@/lib/source";
 import { useState } from "react";
 import type { LiveEngine, LiveSizing, LiveTrade } from "@updown/protocol";
 import { Badge } from "@/components/ui/badge";
@@ -17,20 +17,21 @@ const cents = (v: number | null) => (v === null ? "–" : `${(v * 100).toFixed(1
 const ms = (v: number | null) => (v === null ? "–" : `${Math.round(v)} ms`);
 const STATUS: Record<LiveTrade["status"], { label: string; cls: string }> = {
   matched: { label: "ejecutada", cls: "border-buy/40 text-buy" },
-  delayed: { label: "con retraso", cls: "border-yellow-500/40 text-yellow-500" },
-  pending: { label: "pendiente", cls: "border-yellow-500/40 text-yellow-500" },
-  unmatched: { label: "sin liquidez", cls: "border-yellow-500/40 text-yellow-500" },
+  delayed: { label: "con retraso", cls: "border-warn/40 text-warn" },
+  pending: { label: "pendiente", cls: "border-warn/40 text-warn" },
+  unmatched: { label: "sin liquidez", cls: "border-warn/40 text-warn" },
   rejected: { label: "rechazada", cls: "border-sell/40 text-sell" },
   error: { label: "error", cls: "border-sell/40 text-sell" },
   skipped: { label: "omitida", cls: "text-muted-foreground" },
 };
 
 /**
- * Interruptor de compras reales (motor A, C o D, solo el market en curso; se apaga solo al terminar) y registro de lo ejecutado:
+ * Interruptor de compras reales (motor A o C, solo el market en curso; se apaga solo al terminar) y registro de lo ejecutado:
  * señal vs. ejecución (precio y tiempo). Datos en memoria del servidor, no se guardan.
  */
 export function LiveTradingCard({ tr, slug, venue = "polymarket" }: { tr: TradingView; slug: string; venue?: Venue }) {
   const source = useSource();
+  const asset = useAsset();
   const v = VENUES[venue];
   const cur = v.currency;
   const [pass, setPass] = useState("");
@@ -71,12 +72,12 @@ export function LiveTradingCard({ tr, slug, venue = "polymarket" }: { tr: Tradin
   };
 
   return (
-    <div className={`rounded-md border p-3 ${armed ? "border-sell/60 bg-sell/5" : ""}`}>
+    <div className={`rounded-xl border p-3 sm:p-4 ${armed ? "border-sell/60 bg-sell/5" : ""}`}>
       <div className="flex flex-wrap items-center gap-3">
         <div className="flex items-center gap-2">
-          <Switch id={`live-${venue}`} checked={armed} disabled={busy || !st?.enabled || (!armed && !isCurrent)} onCheckedChange={(v) => void toggle(v)} />
-          <Label htmlFor={`live-${venue}`} className="font-semibold">
-            Compras reales en {v.badge} · motores {SOURCE_LABEL[source]}
+          <Switch id={`live-${asset}-${venue}`} checked={armed} disabled={busy || !st?.enabled || (!armed && !isCurrent)} onCheckedChange={(v) => void toggle(v)} />
+          <Label htmlFor={`live-${asset}-${venue}`} className="font-semibold">
+            Compras reales en {v.badge} · motores {ASSET_INFO[asset].ticker} {SOURCE_LABEL[source]}
           </Label>
         </div>
         <ToggleGroup
@@ -97,9 +98,6 @@ export function LiveTradingCard({ tr, slug, venue = "polymarket" }: { tr: Tradin
           </ToggleGroupItem>
           <ToggleGroupItem value="c" title="Motor C: decide 150 ms después del segundo">
             Motor C
-          </ToggleGroupItem>
-          <ToggleGroupItem value="d" title="Motor D: predictivo, decide cada 100 ms y envía cada orden con su propio límite (el peor precio que aún deja EV positivo)">
-            Motor D
           </ToggleGroupItem>
         </ToggleGroup>
         <ToggleGroup

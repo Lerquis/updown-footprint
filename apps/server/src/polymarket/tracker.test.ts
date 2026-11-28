@@ -39,7 +39,7 @@ test("slotStart alinea a la ventana", () => {
 });
 
 test("buildRecord recorta barras y CVD a la ventana", () => {
-  const rec = buildRecord(market(T0), { a: { points: [] as PmPoint[], trades: [] }, c: { points: [], trades: [] }, d: { points: [], trades: [] }, e: { points: [], trades: [] } }, flow);
+  const rec = buildRecord(market(T0), { a: { points: [] as PmPoint[], trades: [] }, c: { points: [], trades: [] } }, flow);
   assert.deepEqual(rec.bars.map((b) => b.start), [T0, T0 + 60_000]);
   assert.deepEqual(rec.cvd.map((p) => p.cvd), [1, 2]);
 });
@@ -99,4 +99,14 @@ test("el tracker rota, archiva y resuelve el market", async () => {
   assert.equal(closed.closePrice, 99);
   assert.equal(closed.changePct, -1);
   assert.equal(records.length, 2); // upsert con el resultado
+});
+
+test("gammaOutcome: ganador solo con el market cerrado y precios finales 1/0", async () => {
+  const { gammaOutcome } = await import("./api.js");
+  const m = (closed: boolean, prices: string) => ({ closed, outcomes: '["Up", "Down"]', outcomePrices: prices });
+  assert.equal(gammaOutcome(m(true, '["0", "1"]')), "down");
+  assert.equal(gammaOutcome(m(true, '["1", "0"]')), "up");
+  assert.equal(gammaOutcome(m(false, '["1", "0"]')), null);
+  assert.equal(gammaOutcome(m(true, '["0.52", "0.48"]')), null);
+  assert.equal(gammaOutcome(undefined), null);
 });

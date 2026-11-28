@@ -24,9 +24,9 @@ interface RawChainlink {
 export class ChainlinkClient extends EventEmitter<ChainlinkEvents> {
   private readonly ws: ReconnectingWs;
 
-  constructor(url: string, symbol = "btc/usd") {
+  constructor(url: string, symbol = "btc/usd", name = "chainlink") {
     super();
-    this.ws = new ReconnectingWs("chainlink", url, () => [
+    this.ws = new ReconnectingWs(name, url, () => [
       {
         action: "subscribe",
         subscriptions: [{ topic: "crypto_prices_chainlink", type: "update", filters: JSON.stringify({ symbol }) }],

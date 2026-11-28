@@ -3,12 +3,15 @@
 import { useState } from "react";
 import type { FootprintBar, OrderflowSignal } from "@updown/protocol";
 import { Badge } from "@/components/ui/badge";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { SIGNAL_INFO, biasArrow, biasText, fmtClockHM } from "@/lib/flow";
 import { cn } from "@/lib/utils";
+import { useAsset } from "@/lib/source";
+import { Panel } from "./Panel";
 
 const fmtVol = (v: number) => (v === 0 ? "·" : v >= 10 ? v.toFixed(1) : v >= 1 ? v.toFixed(2) : v.toFixed(3));
+/** precio de un nivel sin restos de coma flotante (ETH va en pasos de 0.05) */
+const fmtLevel = (p: number) => (Number.isInteger(p) ? String(p) : p.toFixed(2));
 const signed = (v: number, d = 2) => `${v > 0 ? "+" : ""}${v.toFixed(d)}`;
 
 /** Escalera del footprint de una barra: bid | precio | ask, con desequilibrios y POC resaltados. */
@@ -38,9 +41,9 @@ function Ladder({ bar, signals }: { bar: FootprintBar; signals: OrderflowSignal[
               >
                 {fmtVol(bid)}
               </div>
-              <div className={cn("relative text-center text-muted-foreground", price === poc && "font-bold text-yellow-500")}>
+              <div className={cn("relative text-center text-muted-foreground", price === poc && "font-bold text-warn")}>
                 {st && <span className={cn("absolute left-0 top-0 h-full w-1", st.bias === "bullish" ? "bg-buy" : "bg-sell")} />}
-                {price}
+                {fmtLevel(price)}
                 {price === poc && <span className="ml-0.5 text-[9px]">POC</span>}
               </div>
               <div
@@ -65,14 +68,15 @@ export function FootprintPanel({ bars, signals }: { bars: FootprintBar[]; signal
   const [selected, setSelected] = useState<number | null>(null);
   const list = [...bars].reverse();
   const current = list.find((b) => b.start === selected) ?? list[0];
+  const asset = useAsset();
 
   return (
-    <Card className="gap-0 py-0">
-      <CardHeader className="border-b py-3">
-        <CardTitle>Footprint por barra</CardTitle>
-        <CardDescription>Elige una barra para ver su volumen vendedor/comprador en cada nivel de precio.</CardDescription>
-      </CardHeader>
-      <CardContent className="grid gap-4 p-0 lg:grid-cols-[1.4fr_1fr]">
+    <Panel
+      id={`${asset}.footprint`}
+      title="Footprint por barra"
+      description="Elige una barra para ver su volumen vendedor/comprador en cada nivel de precio."
+      contentClassName="grid @4xl:grid-cols-[1.4fr_1fr]"
+    >
         <div className="max-h-[26rem] overflow-auto">
           <Table className="font-mono text-xs">
             <TableHeader className="sticky top-0 bg-card">
@@ -96,7 +100,7 @@ export function FootprintPanel({ bars, signals }: { bars: FootprintBar[]; signal
                   >
                     <TableCell>
                       {fmtClockHM(b.start)}
-                      {!b.closed && <span className="ml-1 text-yellow-500">●</span>}
+                      {!b.closed && <span className="ml-1 text-warn">●</span>}
                     </TableCell>
                     <TableCell className="text-right">{b.close.toFixed(2)}</TableCell>
                     <TableCell className="text-right">{b.volume.toFixed(2)}</TableCell>
@@ -119,12 +123,12 @@ export function FootprintPanel({ bars, signals }: { bars: FootprintBar[]; signal
           </Table>
           {!list.length && <p className="p-4 text-sm text-muted-foreground">Esperando datos…</p>}
         </div>
-        <div className="border-t p-3 lg:border-l lg:border-t-0">
+        <div className="border-t p-3 sm:p-4 @4xl:border-t-0 @4xl:border-l">
           {current ? (
             <>
               <div className="mb-2 flex items-center justify-between text-xs">
                 <span className="font-semibold">
-                  Barra {fmtClockHM(current.start)} {!current.closed && <span className="text-yellow-500">(en formación)</span>}
+                  Barra {fmtClockHM(current.start)} {!current.closed && <span className="text-warn">(en formación)</span>}
                 </span>
                 <span className="font-mono text-muted-foreground">
                   O {current.open.toFixed(2)} · H {current.high.toFixed(2)} · L {current.low.toFixed(2)} · C {current.close.toFixed(2)}
@@ -136,7 +140,6 @@ export function FootprintPanel({ bars, signals }: { bars: FootprintBar[]; signal
             <p className="text-sm text-muted-foreground">Sin barras todavía.</p>
           )}
         </div>
-      </CardContent>
-    </Card>
+    </Panel>
   );
 }

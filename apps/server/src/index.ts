@@ -1,6 +1,6 @@
 import { createServer } from "node:http";
 import { WebSocketServer } from "ws";
-import { sourcePath, type CompareMarketRow, type CompareResponse, type MarketSource } from "@updown/protocol";
+import { sourcePath, type CompareMarketRow, type CompareResponse, type MarketAsset, type MarketSource } from "@updown/protocol";
 import { createReadStream, existsSync, rmSync } from "node:fs";
 import { basename, join } from "node:path";
 import { config } from "./config.js";
@@ -8,8 +8,7 @@ import { ChainlinkClient } from "./polymarket/chainlinkClient.js";
 import { ChainlinkTwapClient } from "./polymarket/chainlinkTwapClient.js";
 import { LatencyMonitor } from "./polymarket/latency.js";
 import { compareMarkets, compareTotals } from "./polymarket/compare.js";
-import { serverFast } from "./polymarket/serverStrategy.js";
-import { createSource, splitSource, type Source } from "./source.js";
+import { createSource, sourceLabel, splitSource, type AssetMarket, type RefFeed, type Source } from "./source.js";
 // [PREDICT desactivado] import { PredictMarketApi } from "./predict/api.js";
 // [PREDICT desactivado] import { PredictWs } from "./predict/wsClient.js";
 // [PREDICT desactivado] import { PredictAccount } from "./predict/account.js";
@@ -17,9 +16,10 @@ import { createSource, splitSource, type Source } from "./source.js";
 // [PREDICT desactivado] import { parseToken } from "./predict/model.js";
 
 /**
- * Composicion (ADR 0016): lo compartido (Chainlink, latencia al CLOB) + una fuente completa por mercado de Binance
- * (spot siempre; futures si FUTURES_ENABLED). Cada fuente tiene sus canales (`/ws/...` y `/ws/futures/...`), su API, su base,
- * sus backups y sus compras reales. Aqui solo se enruta.
+ * Composicion (ADR 0016 y 0018): lo compartido (Chainlink por activo, latencia al CLOB) + una fuente completa por activo (BTC
+ * siempre; ETH si ETH_ENABLED) y mercado de Binance (spot siempre; futures si FUTURES_ENABLED). Cada fuente tiene sus canales
+ * (`/ws/...`, `/ws/futures/...`, `/ws/eth/...`, `/ws/eth/futures/...`), su API, su base, sus backups y sus compras reales.
+ * Aqui solo se enruta.
  */
 
 // ── Compartido ──
@@ -27,8 +27,13 @@ import { createSource, splitSource, type Source } from "./source.js";
 const hasClob = Boolean(config.pmClob.apiKey && config.pmClob.secret && config.pmClob.passphrase);
 const chainlink: ChainlinkClient | ChainlinkTwapClient = hasClob ? new ChainlinkTwapClient(config.pmTwapWsUrl, config.pmClob) : new ChainlinkClient(config.pmLiveWsUrl);
 console.log(`[polymarket] price feed: ${hasClob ? "Chainlink TWAP 60s (PolyBolt)" : "Chainlink spot (RTDS, sin credenciales)"}`);
-const fast = serverFast();
-if (fast.calibration) console.log(`[fast] deriva calibrada (${fast.calibration.createdAt}, ${fast.calibration.samples} muestras): ${fast.calibration.betas.join(", ")}`);
+/** Chainlink ETH/USD (ADR 0018): el mismo tipo de feed que BTC, otra conexion */
+const ec = config.eth;
+const chainlinkEth: ChainlinkClient | ChainlinkTwapClient | null = !ec.enabled
+  ? null
+  : hasClob
+    ? new ChainlinkTwapClient(config.pmTwapWsUrl, config.pmClob, ec.chainlinkTwapSymbol, 60, "eth:chainlink-twap")
+    : new ChainlinkClient(config.pmLiveWsUrl, ec.chainlinkSymbol, "eth:chainlink");
 
 // Latencia hacia el CLOB de Polymarket cada 15 s (solo lectura: nunca opera). Libro del token Up del market en curso (el de spot).
 let latencyToken: () => string | null = () => null;
@@ -81,9 +86,19 @@ for (const base of [config.predict.dbPath, config.predict.futuresDbPath]) {
 // Predict esta comentado entero: ni se importa ni consume nada. Para reactivarlo, quitar los "// [PREDICT desactivado]" y usar la linea de abajo.
 // [PREDICT desactivado] const shared = { chainlink, latencyMonitor, predict: predictShared };
 const shared = { chainlink, latencyMonitor };
+const btcMarket: AssetMarket = {
+  symbol: config.symbol,
+  pmSymbol: config.pmSymbol,
+  pmSlugPrefix: config.pmSlugPrefix,
+  depthStep: config.depthStep,
+  footprintTick: config.footprintTick,
+  imbalanceMinVol: config.imbalanceMinVol,
+};
 const spot = await createSource(
   {
     id: "spot",
+    asset: "btc",
+    market: btcMarket,
     tradesWsUrl: config.binanceWsUrl,
     depthWsUrl: config.binanceWsUrl,
     restUrl: config.binanceRestUrl,
@@ -99,36 +114,83 @@ const spot = await createSource(
   shared,
 );
 const fc = config.futures;
-const futures = fc.enabled
+/** Fuente futures de un activo (perpetuo USDⓈ-M) */
+const futuresOf = (asset: MarketAsset, market: AssetMarket, dbPath: string, backupPrefix: string, deps: typeof shared, reference?: RefFeed) =>
+  createSource(
+    {
+      id: "futures",
+      asset,
+      market,
+      tradesWsUrl: fc.tradesWsUrl,
+      depthWsUrl: fc.depthWsUrl,
+      restUrl: fc.restUrl,
+      depthMode: "futures",
+      depthSnapshotLimit: fc.depthSnapshotLimit,
+      backfillPageDelayMs: fc.backfillPageDelayMs,
+      dbPath,
+      legacyDbPath: null,
+      backup: backupFor(backupPrefix),
+      reference,
+      // [PREDICT desactivado] predictDbPath: pc.futuresDbPath,
+      // [PREDICT desactivado] predictBackup: backupFor(pc.futuresBackupPrefix),
+    },
+    deps,
+  );
+const futures = fc.enabled ? await futuresOf("btc", btcMarket, fc.dbPath, fc.backupPrefix, shared) : null;
+if (!futures) console.log("[futures] desactivado (FUTURES_ENABLED=false)");
+
+// ── ETH (ADR 0018): el mismo sistema con sus markets, su Chainlink y sus bases ──
+const ethShared = chainlinkEth ? { chainlink: chainlinkEth, latencyMonitor } : null;
+const ethMarket: AssetMarket = {
+  symbol: ec.symbol,
+  pmSymbol: ec.pmSymbol,
+  pmSlugPrefix: ec.pmSlugPrefix,
+  depthStep: ec.depthStep,
+  footprintTick: ec.footprintTick,
+  imbalanceMinVol: ec.imbalanceMinVol,
+  strength: ec.strength,
+};
+const ethSpot = ethShared
   ? await createSource(
       {
-        id: "futures",
-        tradesWsUrl: fc.tradesWsUrl,
-        depthWsUrl: fc.depthWsUrl,
-        restUrl: fc.restUrl,
-        depthMode: "futures",
-        depthSnapshotLimit: fc.depthSnapshotLimit,
-        backfillPageDelayMs: fc.backfillPageDelayMs,
-        dbPath: fc.dbPath,
+        id: "spot",
+        asset: "eth",
+        market: ethMarket,
+        tradesWsUrl: config.binanceWsUrl,
+        depthWsUrl: config.binanceWsUrl,
+        restUrl: config.binanceRestUrl,
+        depthMode: "spot",
+        depthSnapshotLimit: config.depthSnapshotLimit,
+        backfillPageDelayMs: 60,
+        dbPath: ec.dbPath,
         legacyDbPath: null,
-        backup: backupFor(fc.backupPrefix),
-        // [PREDICT desactivado] predictDbPath: pc.futuresDbPath,
-        // [PREDICT desactivado] predictBackup: backupFor(pc.futuresBackupPrefix),
+        backup: backupFor(ec.backupPrefix),
+        // SS: BTC de la misma fuente como referencia
+        reference: spot.refFeed,
       },
-      shared,
+      ethShared,
     )
   : null;
-if (!futures) console.log("[futures] desactivado (FUTURES_ENABLED=false)");
-const sources = new Map<MarketSource, Source>([["spot", spot], ...(futures ? ([["futures", futures]] as const) : [])]);
+const ethFutures = ethShared && fc.enabled ? await futuresOf("eth", ethMarket, ec.futuresDbPath, ec.futuresBackupPrefix, ethShared, futures?.refFeed) : null;
+if (!ethSpot) console.log("[eth] desactivado (ETH_ENABLED=false)");
+
+/** Todas las fuentes por clave `sourceLabel` ("" = BTC spot, "futures", "eth", "eth-futures") */
+const sources = new Map<string, Source>(
+  [spot, futures, ethSpot, ethFutures].filter((s): s is Source => s !== null).map((s) => [sourceLabel(s.asset, s.id), s]),
+);
+const sourceOf = (asset: MarketAsset, source: MarketSource) => sources.get(sourceLabel(asset, source)) ?? null;
 latencyToken = () => spot.tracker.current?.upToken ?? spot.tracker.next?.upToken ?? null;
 
 // ── Comparativa spot vs futures (GET /api/compare) ──
 /** filas ya calculadas de markets con el resultado de las dos fuentes (no cambian): no se vuelve a leer su JSON */
 const compareCache = new Map<string, CompareMarketRow>();
-function compare(limit: number): CompareResponse {
-  if (!futures) return { markets: [], totals: compareTotals([]), futuresEnabled: false };
+function compare(asset: MarketAsset, limit: number): CompareResponse {
+  const spot = sourceOf(asset, "spot");
+  const futures = sourceOf(asset, "futures");
+  if (!spot || !futures) return { markets: [], totals: compareTotals([]), futuresEnabled: false };
   const rows: CompareMarketRow[] = [];
   for (const { slug } of futures.marketStore.list({ limit })) {
+    // los slugs de BTC y ETH no coinciden (btc-updown-5m-... / eth-updown-5m-...): una sola cache vale para los dos
     const cached = compareCache.get(slug);
     if (cached) {
       rows.push(cached);
@@ -158,6 +220,7 @@ const http = createServer((req, res) => {
         // spot en la raiz (como siempre); futures en su propia seccion
         ...spot.health(),
         futures: futures ? futures.health() : { enabled: false },
+        eth: ethSpot ? { spot: ethSpot.health(), futures: ethFutures ? ethFutures.health() : { enabled: false } } : { enabled: false },
         latency: { region: config.region, authReady: latencyMonitor.authReady, reconnects: latencyMonitor.reconnects, last: latencyMonitor.history.at(-1) ?? null },
       }),
     );
@@ -165,8 +228,9 @@ const http = createServer((req, res) => {
   }
   if (url.pathname === "/api/compare" && req.method === "GET") {
     const limit = Math.min(500, Math.max(1, Number(url.searchParams.get("limit")) || 96));
+    const asset: MarketAsset = url.searchParams.get("asset") === "eth" ? "eth" : "btc";
     res.writeHead(200, { ...cors, "content-type": "application/json" });
-    res.end(JSON.stringify(compare(limit)));
+    res.end(JSON.stringify(compare(asset, limit)));
     return;
   }
   if (url.pathname === "/api/replays" && req.method === "GET") {
@@ -181,8 +245,8 @@ const http = createServer((req, res) => {
     createReadStream(file).pipe(res);
     return;
   }
-  const { source, path } = splitSource(url.pathname);
-  const src = sources.get(source);
+  const { asset, source, path } = splitSource(url.pathname);
+  const src = sourceOf(asset, source);
   if (src?.handleHttp(req, res, path, url)) return;
   res.writeHead(404).end();
 });
@@ -190,11 +254,11 @@ const http = createServer((req, res) => {
 // Un WebSocketServer por canal y fuente; el enrutado por path se hace en `upgrade`.
 // perMessageDeflate solo para mensajes grandes (snapshots); los deltas pequenos no se comprimen.
 const routes = new Map<string, WebSocketServer>();
-for (const [id, src] of sources)
+for (const src of sources.values())
   for (const [path, channel] of src.channels) {
     const wss = new WebSocketServer({ noServer: true, perMessageDeflate: { threshold: 1024 } });
     wss.on("connection", (ws) => channel.add(ws));
-    routes.set(sourcePath(id, path), wss);
+    routes.set(sourcePath(src.id, path, src.asset), wss);
   }
 http.on("upgrade", (req, socket, head) => {
   const origin = req.headers.origin;
@@ -214,6 +278,7 @@ http.on("upgrade", (req, socket, head) => {
 http.listen(config.port, async () => {
   console.log(`[server] http/ws on :${config.port} (${[...routes.keys()].join(", ")}, /health)`);
   chainlink.start();
+  chainlinkEth?.start();
   latencyMonitor.start();
   // [PREDICT desactivado] predictShared?.price.start();
   // [PREDICT desactivado] // la cuenta de Predict solo LEE de la cadena al arrancar (firmante, aprobaciones, saldo); el login es al activar
@@ -239,7 +304,7 @@ const shutdown = async (signal: string) => {
   if (shuttingDown) return;
   shuttingDown = true;
   console.log(`[shutdown] ${signal} recibido`);
-  // 1) backups finales PRIMERO, con todo aun en marcha (ADR 0013); las dos bases a la vez
+  // 1) backups finales PRIMERO, con todo aun en marcha (ADR 0013); todas las bases a la vez
   await Promise.all([...sources.values()].map((s) => s.finalBackup()));
   // 2) parar todo
   const step = (name: string, fn: () => void) => {
@@ -250,6 +315,7 @@ const shutdown = async (signal: string) => {
     }
   };
   step("chainlink", () => chainlink.stop());
+  step("eth chainlink", () => chainlinkEth?.stop());
   step("latency", () => latencyMonitor.stop());
   // [PREDICT desactivado] step("predict", () => predictShared?.price.stop());
   // [PREDICT desactivado] step("predict latency", () => predictShared?.latency.stop());

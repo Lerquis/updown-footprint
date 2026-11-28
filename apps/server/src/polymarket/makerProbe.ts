@@ -3,8 +3,8 @@ import type { LiveEngine, MakerProbeSample, MakerProbeState, PmMarket, PmSide, P
 import type { ClobCall } from "./liveTrader.js";
 
 /**
- * Check maker (docs/features/latency.md): ordenes MAKER reales siguiendo las senales del motor elegido (A, C o D), para medir
- * el ciclo de una orden limite (la forma de operar del motor E) y si se ejecuta.
+ * Check maker (docs/features/latency.md): ordenes MAKER reales siguiendo las senales del motor elegido (A o C), para medir
+ * el ciclo de una orden limite y si se ejecuta.
  *  - Compra del motor -> compra post-only a mejor bid + 1 tick (si el spread es de 1 tick, se une al mejor bid) de
  *    max(1 USDC, 5 tokens); se cancela a los `restMs` (2 s) si no se lleno entera.
  *  - Venta del motor -> lo mismo en el lado ask con los tokens comprados asi (si hay al menos 5).
@@ -183,7 +183,7 @@ export class MakerProbe extends EventEmitter<{ sample: [MakerProbeSample]; state
 
   /** Activa / desactiva (con el motor a seguir). Devuelve un error legible o null. */
   setEnabled(on: boolean, engine?: LiveEngine): string | null {
-    if (engine === "a" || engine === "c" || engine === "d") this.engine = engine;
+    if (engine === "a" || engine === "c") this.engine = engine;
     if (on && !this.d.trader.enabled) return `no disponible: ${this.d.trader.disabledReason}`;
     if (on && !this.enabled) {
       this.enabled = true;
@@ -294,8 +294,6 @@ export class MakerProbe extends EventEmitter<{ sample: [MakerProbeSample]; state
     const skip = (why: string) => this.finish({ ...s, error: why });
     if (this.busy.has(sig.side)) return skip("ya hay una orden de ese lado en curso");
     if (price === null) return skip("sin libro util");
-    // un limite de compra del motor D tambien se respeta aqui
-    if (sig.action === "buy" && sig.limit !== undefined && price > sig.limit + 1e-9) return skip(`el precio maker ${price} supera el limite ${sig.limit}`);
     if (sig.action === "buy") {
       s.size = makerSize(price, minUsd, minShares);
       if (this.spent + s.size * price > this.opts.maxMarketUsd + 1e-9) return skip(`tope por market (${round(this.spent, 2)} de ${this.opts.maxMarketUsd} USDC)`);

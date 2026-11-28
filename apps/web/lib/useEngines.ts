@@ -28,11 +28,11 @@ const IDS: PmEngineId[] = ENGINE_IDS;
 const track = (slug: string | null, decisions: PmDecision[]): EngineTrack => ({ slug, decisions, trades: decisions.flatMap((d) => d.signals) });
 
 /**
- * Canal /ws/engines (decisiones de los motores A, C, D y E). Solo se conecta con `enabled` (drawer abierto):
+ * Canal /ws/engines (decisiones de los motores A y C). Solo se conecta con `enabled` (drawer abierto):
  * fuera de eso no consume red ni CPU. Los deltas (4 por segundo) se vuelcan a estado una vez por frame.
  */
 export function useEngines(enabled: boolean, channel: string = CHANNELS.engines): EnginesView {
-  const [view, setView] = useState<Omit<EnginesView, "link">>({ thresholds: null, info: [], tracks: { a: EMPTY, c: EMPTY, d: EMPTY, e: EMPTY } });
+  const [view, setView] = useState<Omit<EnginesView, "link">>({ thresholds: null, info: [], tracks: { a: EMPTY, c: EMPTY } });
   const pending = useRef<EnginesServerMessage[]>([]);
   const frame = useRef(0);
 

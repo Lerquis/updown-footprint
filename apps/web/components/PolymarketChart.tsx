@@ -1,7 +1,22 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { CvdPoint, FootprintBar, LiveTrade, OrderflowSignal, PmEngineId, PmMarket, PmOrder, PmPoint, PmSignal } from "@updown/protocol";
+import {
+  STRENGTH_VARIANTS,
+  type CvdPoint,
+  type FootprintBar,
+  type LiveTrade,
+  type OrderflowSignal,
+  type PmEngineId,
+  type PmMarket,
+  type PmPoint,
+  type PmRef,
+  type PmSignal,
+  type PmStrengthEvent,
+  type PmStrengthSet,
+  type PmStrengthVariant,
+} from "@updown/protocol";
+import { STRENGTH_LABEL } from "@/lib/engines";
 import { biasArrow, fmtClockHM, SIGNAL_INFO } from "@/lib/flow";
 import { mid } from "@/lib/usePolymarket";
 import { VENUES } from "@/lib/venue";
@@ -13,9 +28,7 @@ export interface EngineSeries {
   desc: string;
   points: PmPoint[];
   trades: PmSignal[];
-  /** motor E: ordenes en reposo (cada una es un tramo horizontal en su precio, de que entra al libro a que se ejecuta o cancela) */
-  orders?: PmOrder[];
-  /** operaciones REALES ejecutadas siguiendo a este motor (A, C o D, market en curso) */
+  /** operaciones REALES ejecutadas siguiendo a este motor (A o C, market en curso) */
   real?: LiveTrade[];
 }
 
@@ -26,10 +39,14 @@ interface Props {
   bars: FootprintBar[];
   cvd: CvdPoint[];
   signals: OrderflowSignal[];
-  /** motores A, C, D y E: una seccion de probabilidad + operaciones por motor */
+  /** motores A y C: una seccion de probabilidad + operaciones por motor */
   engines: EngineSeries[];
   /** titulo de la franja de Chainlink (cambia con el mercado: TWAP en Polymarket, precio puntual en Predict) */
   chainTitle?: string;
+  /** SS: movimientos con fuerza del motor C por variante (una seccion del motor C por variante, con sus bandas) */
+  strength?: PmStrengthSet | null;
+  /** tokens de la referencia (BTC) en la ventana del market: una seccion por variante SS, con sus bandas */
+  reference?: PmRef | null;
 }
 
 const PAD_L = 8;
@@ -43,6 +60,20 @@ const SECTIONS = [
   { key: "delta", h: 60, title: "Delta por barra footprint" },
 ] as const;
 const GAP = 18;
+const REF_H = 150;
+/** motor sobre el que se mide SS */
+const SS_ENGINE: PmEngineId = "c";
+
+/** Rango minimo de un precio: proporcional al precio (unos 5 USD en BTC; en SOL milesimas), asi un activo barato no sale plano */
+const minSpanOf = (vals: number[]) => {
+  const v = vals.find((x) => x > 0);
+  return v ? v * 5e-5 : 1;
+};
+/** Decimales de las etiquetas de un eje de precio segun su rango */
+const decOf = (lo: number, hi: number) => {
+  const span = hi - lo;
+  return span >= 20 ? 0 : span >= 2 ? 1 : span >= 0.2 ? 2 : 3;
+};
 
 /** Rango [min,max] con margen; si es plano abre un rango minimo. */
 function extent(vals: number[], pad: number, minSpan: number): [number, number] {
@@ -70,7 +101,7 @@ const fmtCents = (v: number | null) => (v === null ? "–" : `${(v * 100).toFixe
  * más CVD y delta por barra footprint, todo sobre el mismo eje de tiempo (la ventana de 5 min).
  * SVG: son pocos puntos (≤ 300).
  */
-export function PolymarketChart({ market, points, bars, cvd, signals, engines, chainTitle }: Props) {
+export function PolymarketChart({ market, points, bars, cvd, signals, engines, chainTitle, strength = null, reference = null }: Props) {
   const ref = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(800);
   const [hover, setHover] = useState<number | null>(null);
@@ -89,25 +120,50 @@ export function PolymarketChart({ market, points, bars, cvd, signals, engines, c
   const xOf = (t: number) => PAD_L + ((t - start) / (end - start)) * plotW;
 
   const engineKeys = engines.map((e) => e.id).join(",");
+  const refLabel = reference?.label ?? null;
+  // con SS, el motor C sale una vez por variante (cada una con sus bandas) y la referencia tambien
+  const variants: readonly PmStrengthVariant[] = strength ? STRENGTH_VARIANTS : [];
+  const views = useMemo(
+    () =>
+      engines.flatMap((e, idx) =>
+        e.id === SS_ENGINE && variants.length ? variants.map((v) => ({ idx, id: e.id, v })) : [{ idx, id: e.id, v: null as PmStrengthVariant | null }],
+      ),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [engineKeys, variants.length],
+  );
   const layout = useMemo(() => {
     let y = 4;
-    const probs = engines.map((e) => ({ key: `prob-${e.id}`, h: PROB_H, title: `${e.label} (${e.desc}) · P(Up) del motor (violeta) vs mercado (blanco) · compras / ventas` }));
-    return [...probs, ...SECTIONS.map((s) => (s.key === "chain" && chainTitle ? { ...s, title: chainTitle } : s))].map((s) => {
+    const probs = views.map(({ idx, id, v }) => {
+      const e = engines[idx]!;
+      return {
+        key: `prob-${id}${v ? `-${v}` : ""}`,
+        h: PROB_H,
+        title: v
+          ? `${e.label} · ${STRENGTH_LABEL[v]} · P(Up) del motor (violeta) vs mercado (línea neutra) · compras / ventas · bandas = movimientos con fuerza`
+          : `${e.label} (${e.desc}) · P(Up) del motor (violeta) vs mercado (línea neutra) · compras / ventas`,
+      };
+    });
+    const rest = SECTIONS.flatMap((s) => {
+      const sec = s.key === "chain" && chainTitle ? { ...s, title: chainTitle } : s;
+      // tokens de la referencia (BTC) justo debajo de los del activo: uno por variante SS, con sus bandas
+      const refs = s.key === "price" && refLabel ? variants.map((v) => ({ key: `ref-${v}`, h: REF_H, title: `Tokens ${refLabel} Up / Down (¢) del mismo tramo · marcas ${STRENGTH_LABEL[v]}` })) : [];
+      return [sec, ...refs];
+    });
+    return [...probs, ...rest].map((s) => {
       const top = y + 14;
       y += s.h + GAP;
       return { ...s, top, bottom: top + s.h - 14 };
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [engineKeys, chainTitle]);
+  }, [views, chainTitle, refLabel]);
   const totalH = layout[layout.length - 1]!.bottom + 22;
 
   const data = useMemo(() => {
     const up = points.map((p) => ({ time: p.time, v: mid(p.upBid, p.upAsk) })).filter((p): p is { time: number; v: number } => p.v !== null);
     const down = points.map((p) => ({ time: p.time, v: mid(p.downBid, p.downAsk) })).filter((p): p is { time: number; v: number } => p.v !== null);
-    // Escala ajustada al rango real del market (con margen), siempre dentro de 0-1.
-    const [lo, hi] = extent([...up, ...down].map((p) => p.v), 0.1, 0.1);
-    const pLo = Math.max(0, lo);
-    const pHi = Math.min(1, hi);
+    // Precio de los tokens: rango completo 0-100¢ (fijo, para comparar markets de un vistazo)
+    const pLo = 0;
+    const pHi = 1;
 
     // probabilidad de cada motor (con sus propias muestras) frente a la del mercado; misma escala para compararlos
     const probs = engines.map((e) => {
@@ -119,32 +175,42 @@ export function PolymarketChart({ market, points, bars, cvd, signals, engines, c
           return { time: p.time, v: u !== null && d !== null ? (u + 1 - d) / 2 : u !== null ? u : d !== null ? 1 - d : null };
         })
         .filter((p): p is { time: number; v: number } => p.v !== null);
-      return { id: e.id, eng, mkt, trades: e.trades, real: e.real ?? [], orders: e.orders ?? [], lastT: e.points[e.points.length - 1]?.time ?? end };
+      return { id: e.id, eng, mkt, trades: e.trades, real: e.real ?? [], lastT: e.points[e.points.length - 1]?.time ?? end };
     });
-    const [qLo, qHi] = extent(probs.flatMap((pr) => [...pr.eng, ...pr.mkt].map((p) => p.v)), 0.1, 0.2);
-    const prLo = Math.max(0, qLo);
-    const prHi = Math.min(1, qHi);
+    // P(Up) de los motores: rango completo 0-100%
+    const prLo = 0;
+    const prHi = 1;
 
     const bin = cvd.filter((p) => p.price > 0);
-    const [bLo, bHi] = extent(
-      [...bin.map((p) => p.price), ...signals.flatMap((sg) => [sg.priceLo, sg.priceHi])].filter((v) => v > 0),
-      0.08,
-      5,
-    );
+    const binVals = [...bin.map((p) => p.price), ...signals.flatMap((sg) => [sg.priceLo, sg.priceHi])].filter((v) => v > 0);
+    const [bLo, bHi] = extent(binVals, 0.08, minSpanOf(binVals));
 
     const chain = points.filter((p) => p.chainlink !== null).map((p) => ({ time: p.time, v: p.chainlink! }));
-    const [kLo, kHi] = extent([...chain.map((p) => p.v), ...(priceToBeat !== null ? [priceToBeat] : [])], 0.1, 5);
+    const chainVals = [...chain.map((p) => p.v), ...(priceToBeat !== null ? [priceToBeat] : [])];
+    const [kLo, kHi] = extent(chainVals, 0.1, minSpanOf(chainVals));
+
+    const refPts = (reference?.points ?? []).filter((p) => p.time >= start && p.time <= end);
+    const refUp = refPts.filter((p) => p.up !== null).map((p) => ({ time: p.time, v: p.up! }));
+    const refDown = refPts.filter((p) => p.down !== null).map((p) => ({ time: p.time, v: p.down! }));
+    // tokens de la referencia: tambien 0-100¢
+    const rLo = 0;
+    const rHi = 1;
 
     const base = cvd[0]?.cvd ?? 0;
     const cv = cvd.map((p) => [p.time, p.cvd - base] as const);
     const [cLo, cHi] = extent([0, ...cv.map((p) => p[1])], 0.1, 1);
     const dMax = Math.max(0.001, ...bars.map((b) => Math.abs(b.delta)));
-    return { probs, prLo, prHi, up, down, pLo, pHi, bin, bLo, bHi, chain, kLo, kHi, cv, cLo, cHi, dMax };
-  }, [points, cvd, bars, signals, priceToBeat, engines, end]);
+    return { probs, prLo, prHi, up, down, pLo, pHi, bin, bLo, bHi, chain, kLo, kHi, refUp, refDown, rLo, rHi, cv, cLo, cHi, dMax };
+  }, [points, cvd, bars, signals, priceToBeat, engines, start, end, reference]);
 
   type L = (typeof layout)[number];
-  const probSecs = layout.slice(0, engines.length);
-  const [sPrice, sBin, sChain, sCvd, sDelta] = layout.slice(engines.length) as [L, L, L, L, L];
+  const probSecs = layout.slice(0, views.length);
+  const secOf = (k: string) => layout.find((s) => s.key === k)!;
+  const [sPrice, sBin, sChain, sCvd, sDelta] = (["price", "bin", "chain", "cvd", "delta"] as const).map(secOf) as [L, L, L, L, L];
+  const refSecs = refLabel ? variants.map((v) => ({ v, sec: secOf(`ref-${v}`) })) : [];
+  const yRefIn = (sec: L) => (v: number) => sec.bottom - ((v - data.rLo) / (data.rHi - data.rLo)) * (sec.bottom - sec.top);
+  const binDec = decOf(data.bLo, data.bHi);
+  const chainDec = decOf(data.kLo, data.kHi);
   const sFirst = layout[0]!;
   const yProbIn = (sec: L) => (v: number) => sec.bottom - ((v - data.prLo) / (data.prHi - data.prLo)) * (sec.bottom - sec.top);
   const yPrice = (v: number) => sPrice.bottom - ((v - data.pLo) / (data.pHi - data.pLo)) * (sPrice.bottom - sPrice.top);
@@ -175,6 +241,28 @@ export function PolymarketChart({ market, points, bars, cvd, signals, engines, c
   );
 
   const hovered = hover === null ? null : nearest(points, hover);
+
+  /** Senales SS de una variante en una seccion: solo el punto (y linea vertical) del segundo en que se detectaron */
+  const ssMarks = (sec: L, events: PmStrengthEvent[], tag: string, yOf: (v: number) => number, valueOf: (e: PmStrengthEvent) => number | null | undefined) =>
+    events.map((e) => {
+      if (e.time < start || e.time > end) return null;
+      const x = xOf(e.time);
+      const up = e.dir === "up";
+      const v = valueOf(e);
+      const y = v != null ? yOf(v) : null;
+      const refTxt = e.refUpMove != null ? ` · Up ${refLabel ?? "ref"} ${e.refUpMove >= 0 ? "+" : ""}${(e.refUpMove * 100).toFixed(0)}¢ en esa ventana` : "";
+      const ly = y ?? sec.top + 12;
+      return (
+        <g key={`ss-${tag}-${e.time}-${e.dir}`} className={up ? "fill-buy stroke-buy" : "fill-sell stroke-sell"}>
+          <title>{`SS ${up ? "▲ subida" : "▼ bajada"} detectada ${fmtClockHM(e.time)} · fuerza ${e.score}/100 · P(Up) C ${(e.from * 100).toFixed(0)}% → ${(e.p * 100).toFixed(0)}% en los ${e.seconds} s anteriores · sorpresa ${e.z.toFixed(1)}σ${refTxt}`}</title>
+          <line x1={x} x2={x} y1={sec.top} y2={sec.bottom} strokeWidth={0.8} strokeDasharray="2 3" opacity={0.5} />
+          {y !== null && <circle cx={x} cy={y} r={4} className="stroke-background" strokeWidth={1.2} />}
+          <text x={x} y={up ? ly - 8 : ly + 15} textAnchor="middle" className="stroke-none text-[9px] font-bold">
+            {`${up ? "▲" : "▼"}${e.score}`}
+          </text>
+        </g>
+      );
+    });
 
   return (
     <div ref={ref} className="relative w-full select-none">
@@ -224,11 +312,13 @@ export function PolymarketChart({ market, points, bars, cvd, signals, engines, c
         ))}
 
         {/* Una seccion por motor: su P(Up) frente a la del mercado y sus compras / ventas */}
-        {data.probs.map((pr, i) => {
+        {views.map((view, i) => {
+          const pr = data.probs[view.idx]!;
           const sec = probSecs[i]!;
           const yProb = yProbIn(sec);
           return (
-            <g key={`prob-${pr.id}`}>
+            <g key={sec.key}>
+              {view.v && strength && ssMarks(sec, strength[view.v], sec.key, yProb, (e) => e.p)}
               {[0.1, 0.25, 0.5, 0.75, 0.9].filter((v) => v >= data.prLo && v <= data.prHi).map((v) => (
                 <g key={`q${v}`}>
                   <line x1={PAD_L} x2={PAD_L + plotW} y1={yProb(v)} y2={yProb(v)} className="stroke-border" strokeWidth={0.4} strokeDasharray={v === 0.5 ? "4 3" : undefined} />
@@ -238,7 +328,7 @@ export function PolymarketChart({ market, points, bars, cvd, signals, engines, c
                 </g>
               ))}
               <path d={path(pr.mkt.map((p) => [xOf(p.time), yProb(p.v)]))} className="fill-none stroke-foreground" strokeWidth={1.2} opacity={0.7} />
-              <path d={path(pr.eng.map((p) => [xOf(p.time), yProb(p.v)]))} className="fill-none stroke-violet-400" strokeWidth={1.8} />
+              <path d={path(pr.eng.map((p) => [xOf(p.time), yProb(p.v)]))} className="fill-none stroke-chain" strokeWidth={1.8} />
               {/* compras/ventas reales: circulo hueco donde se ejecuto, unido a la señal (distancia en tiempo y precio) */}
               {pr.real.map((t) => {
                 if (t.avgPrice === null || t.respondedAt === null) return null;
@@ -248,54 +338,27 @@ export function PolymarketChart({ market, points, bars, cvd, signals, engines, c
                 const x = xOf(t.respondedAt);
                 const y = yProb(upEq(t.avgPrice));
                 return (
-                  <g key={`real-${t.signalId}`} className="stroke-yellow-400">
+                  <g key={`real-${t.signalId}`} className="stroke-warn">
                     <title>{`REAL: ${t.action === "buy" ? "compra" : "venta"} ${t.side === "up" ? "Up" : "Down"} ${t.filledShares.toFixed(2)} tokens a ${(t.avgPrice * 100).toFixed(1)}¢ (señal ${(t.signalPrice * 100).toFixed(1)}¢) · ${t.respondedAt - t.signalTime} ms desde la señal · orden ${t.latencyMs ?? "–"} ms`}</title>
                     <line x1={x0} y1={y0} x2={x} y2={y} strokeWidth={1.2} strokeDasharray="2 2" />
                     <circle cx={x} cy={y} r={6} className="fill-none" strokeWidth={2} />
-                    <text x={x + 8} y={y - 6} className="fill-yellow-400 stroke-none text-[9px] font-bold">
+                    <text x={x + 8} y={y - 6} className="fill-warn stroke-none text-[9px] font-bold">
                       REAL {(t.avgPrice * 100).toFixed(0)}¢
                     </text>
                   </g>
                 );
               })}
-              {/* motor E: ordenes en reposo (tramo en su precio Up-equivalente; continuo = ejecutada, discontinuo = cancelada) */}
-              {pr.orders.map((o) => {
-                const v = o.side === "up" ? o.price : 1 - o.price;
-                if (v < data.prLo || v > data.prHi) return null;
-                const t0 = Math.max(start, o.liveAt);
-                const t1 = Math.min(end, o.status === "filled" ? (o.filledAt ?? o.liveAt) : (o.cancelAt ?? pr.lastT));
-                if (o.status === "pending" || t1 < t0) return null;
-                const y = yProb(v);
-                return (
-                  <line
-                    key={o.id}
-                    x1={xOf(t0)}
-                    x2={Math.max(xOf(t0) + 1.5, xOf(t1))}
-                    y1={y}
-                    y2={y}
-                    className={o.side === "up" ? "stroke-buy" : "stroke-sell"}
-                    strokeWidth={o.status === "filled" ? 2.5 : 1.5}
-                    strokeDasharray={o.status === "cancelled" ? "3 2" : undefined}
-                    opacity={o.action === "buy" ? 0.85 : 0.55}
-                  >
-                    <title>{`Orden ${o.action === "buy" ? "de compra" : "de venta"} ${o.side === "up" ? "Up" : "Down"} a ${(o.price * 100).toFixed(0)}¢ · ${o.shares} tokens · cola por delante al entrar ${o.queueAhead.toFixed(0)} · ${o.status === "filled" ? "ejecutada" : o.status === "cancelled" ? `cancelada (${o.cancelReason ?? "–"})` : "en el libro"}${o.filledShares > 0 && o.status !== "filled" ? ` · ejecutados ${o.filledShares}` : ""}`}</title>
-                  </line>
-                );
-              })}
               {pr.trades.map((t) => {
                 // Up-equivalente: comprar/vender Down a q equivale a 1-q en la escala de Up
                 const upEq = (p: number) => Math.min(data.prHi, Math.max(data.prLo, t.side === "up" ? p : 1 - p));
-                // D y E: el marcador va donde se ejecuto (precio y momento), unido a la decision si fue taker
-                const x = xOf(t.execTime ?? t.time);
+                const x = xOf(t.time);
                 const y = yProb(upEq(t.price));
                 const buy = t.action === "buy";
                 const up = t.side === "up";
-                const showSignal = t.signalPrice !== undefined && !t.maker && t.execTime !== undefined;
                 return (
                   <g key={t.id} className={up ? "fill-buy stroke-buy" : "fill-sell stroke-sell"}>
-                    <title>{`${buy ? "COMPRAR" : "VENDER"} ${up ? "Up" : "Down"} a ${(t.price * 100).toFixed(0)}¢ (${t.reason}${t.maker ? ", maker" : ""}) · ${fmtClockHM(t.time)}${showSignal ? ` · al decidir ${(t.signalPrice! * 100).toFixed(0)}¢, ejecutada ${((t.execTime! - t.time) / 1000).toFixed(1)} s después` : ""}${t.limit !== undefined ? ` · límite ${(t.limit * 100).toFixed(0)}¢` : ""} · ${t.shares} tokens · ${t.amount} USDC · P motor ${(t.pSide * 100).toFixed(0)}% · edge ${(t.edge * 100).toFixed(1)}¢ · faltaban ${t.tau.toFixed(0)}s`}</title>
+                    <title>{`${buy ? "COMPRAR" : "VENDER"} ${up ? "Up" : "Down"} a ${(t.price * 100).toFixed(0)}¢ (${t.reason}) · ${fmtClockHM(t.time)} · ${t.shares} tokens · ${t.amount} USDC · P motor ${(t.pSide * 100).toFixed(0)}% · edge ${(t.edge * 100).toFixed(1)}¢ · faltaban ${t.tau.toFixed(0)}s`}</title>
                     <line x1={x} x2={x} y1={sec.top} y2={sec.bottom} strokeWidth={1} strokeDasharray="1 3" opacity={0.5} />
-                    {showSignal && <line x1={xOf(t.time)} y1={yProb(upEq(t.signalPrice!))} x2={x} y2={y} strokeWidth={1} strokeDasharray="2 2" opacity={0.8} />}
                     {buy ? <path d={`M${x},${y - 8}L${x - 6},${y + 4}L${x + 6},${y + 4}Z`} className="stroke-background" strokeWidth={1} /> : <path d={`M${x},${y + 8}L${x - 6},${y - 4}L${x + 6},${y - 4}Z`} className="stroke-background" strokeWidth={1} />}
                     <text x={x} y={buy ? y + 16 : y - 11} textAnchor="middle" className="stroke-none text-[9px] font-bold">
                       {`${buy ? "C" : "V"} ${up ? "Up" : "Dn"} ${(t.price * 100).toFixed(0)}¢`}
@@ -340,12 +403,12 @@ export function PolymarketChart({ market, points, bars, cvd, signals, engines, c
         })}
 
         {/* Precio Binance + señales (rango de la zona y marca) */}
-        <path d={path(data.bin.map((p) => [xOf(p.time), yBin(p.price)]))} className="fill-none stroke-yellow-500" strokeWidth={1.4} />
+        <path d={path(data.bin.map((p) => [xOf(p.time), yBin(p.price)]))} className="fill-none stroke-warn" strokeWidth={1.4} />
         <text x={PAD_L + plotW + 4} y={sBin.top + 8} className="fill-muted-foreground text-[10px]">
-          {data.bHi.toFixed(0)}
+          {data.bHi.toFixed(binDec)}
         </text>
         <text x={PAD_L + plotW + 4} y={sBin.bottom} className="fill-muted-foreground text-[10px]">
-          {data.bLo.toFixed(0)}
+          {data.bLo.toFixed(binDec)}
         </text>
         {signals.map((sg) => {
           const x = xOf(sg.time);
@@ -369,13 +432,38 @@ export function PolymarketChart({ market, points, bars, cvd, signals, engines, c
           );
         })}
 
+        {/* Tokens de la referencia (BTC), una seccion por variante SS con sus bandas */}
+        {refSecs.map(({ v, sec }) => {
+          const yRef = yRefIn(sec);
+          return (
+            <g key={sec.key}>
+              {strength && ssMarks(sec, strength[v], sec.key, yRef, (e) => e.refUp)}
+              {[0.1, 0.25, 0.5, 0.75, 0.9].filter((q) => q >= data.rLo && q <= data.rHi).map((q) => (
+                <g key={`rq${q}`}>
+                  <line x1={PAD_L} x2={PAD_L + plotW} y1={yRef(q)} y2={yRef(q)} className="stroke-border" strokeWidth={0.4} strokeDasharray={q === 0.5 ? "4 3" : undefined} />
+                  <text x={PAD_L + plotW + 4} y={yRef(q) + 3} className="fill-muted-foreground text-[10px]">
+                    {Math.round(q * 100)}¢
+                  </text>
+                </g>
+              ))}
+              <path d={path(data.refDown.map((p) => [xOf(p.time), yRef(p.v)]))} className="fill-none stroke-sell" strokeWidth={1.3} opacity={0.75} />
+              <path d={path(data.refUp.map((p) => [xOf(p.time), yRef(p.v)]))} className="fill-none stroke-buy" strokeWidth={1.6} />
+              {!data.refUp.length && (
+                <text x={PAD_L + plotW / 2} y={(sec.top + sec.bottom) / 2} textAnchor="middle" className="fill-muted-foreground text-[10px]">
+                  sin datos del market de {refLabel} de este tramo
+                </text>
+              )}
+            </g>
+          );
+        })}
+
         {/* Precio Chainlink + señales ancladas a su precio en el instante de la señal */}
-        <path d={path(data.chain.map((p) => [xOf(p.time), yChain(p.v)]))} className="fill-none stroke-violet-400" strokeWidth={1.5} />
+        <path d={path(data.chain.map((p) => [xOf(p.time), yChain(p.v)]))} className="fill-none stroke-chain" strokeWidth={1.5} />
         <text x={PAD_L + plotW + 4} y={sChain.top + 8} className="fill-muted-foreground text-[10px]">
-          {data.kHi.toFixed(0)}
+          {data.kHi.toFixed(chainDec)}
         </text>
         <text x={PAD_L + plotW + 4} y={sChain.bottom} className="fill-muted-foreground text-[10px]">
-          {data.kLo.toFixed(0)}
+          {data.kLo.toFixed(chainDec)}
         </text>
         {priceToBeat !== null && (
           <g>
@@ -412,7 +500,7 @@ export function PolymarketChart({ market, points, bars, cvd, signals, engines, c
 
         {/* CVD */}
         <line x1={PAD_L} x2={PAD_L + plotW} y1={yCvd(0)} y2={yCvd(0)} className="stroke-border" strokeDasharray="3 3" strokeWidth={0.8} />
-        <path d={path(data.cv.map(([t, v]) => [xOf(t), yCvd(v)]))} className="fill-none stroke-sky-400" strokeWidth={1.4} />
+        <path d={path(data.cv.map(([t, v]) => [xOf(t), yCvd(v)]))} className="fill-none stroke-info" strokeWidth={1.4} />
         <text x={PAD_L + plotW + 4} y={sCvd.top + 8} className="fill-muted-foreground text-[10px]">
           {data.cHi.toFixed(1)}
         </text>
@@ -445,7 +533,7 @@ export function PolymarketChart({ market, points, bars, cvd, signals, engines, c
         >
           <div className="font-mono text-muted-foreground">{new Date(hovered.time).toLocaleTimeString("es", { hour12: false })}</div>
           {hovered.chainlink !== null && (
-            <div className="text-violet-400">
+            <div className="text-chain">
               Chainlink <b className="font-mono">{hovered.chainlink.toFixed(2)}</b>
             </div>
           )}
@@ -459,7 +547,7 @@ export function PolymarketChart({ market, points, bars, cvd, signals, engines, c
       )}
 
       <p className="px-3 pb-1.5 text-[11px] text-muted-foreground">
-        <span className="text-buy">━</span> token Up · <span className="text-sell">━</span> token Down · <span className="text-yellow-500">━</span> Binance · <span className="text-violet-400">━</span> Chainlink (┅ price to beat) · punto = señal (en Binance, en su zona de precio; en los tokens, anclada al precio de Up)
+        <span className="text-buy">━</span> token Up · <span className="text-sell">━</span> token Down · <span className="text-warn">━</span> Binance · <span className="text-chain">━</span> Chainlink (┅ price to beat) · punto = señal (en Binance, en su zona de precio; en los tokens, anclada al precio de Up)
         (<b className="text-buy">▲ alcista</b> / <b className="text-sell">▼ bajista</b>; IMB · ABS · AGOT · DIV)
       </p>
     </div>

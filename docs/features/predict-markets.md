@@ -1,10 +1,10 @@
-# Rondas de Predict.fun (BTC Up/Down 5m) con los motores A, C, D y E
+# Rondas de Predict.fun (BTC Up/Down 5m) con los motores A y C
 
 **Estado**: **desactivada (2026-11-27)**: los resultados no fueron los esperados. El código sigue en `apps/server/src/predict/` y el frontend (`venue="predict"`), pero el cableado está comentado con `// [PREDICT desactivado]` en `apps/server/src/index.ts`, `apps/server/src/source.ts` y `apps/web/components/MarketDashboard.tsx`: no se importa, no abre conexiones (REST, WS, HTTP/2), no crea bases ni backups y el panel no se muestra. Para reactivarlo, descomentar esas líneas (y quitar las que las sustituyen justo debajo). Sus bases y backups se borraron (local, volumen de Railway y R2 `updown-predict*/`): mientras esté desactivado, `index.ts` borra al arrancar cualquier `predict*-v2.db` que quede; **quitar ese bloque al reactivarlo**. Antes estaba implementada: motores en papel, compras reales con interruptor y latencia a la API de órdenes (2026-11-27). Decisión: [ADR 0017](../decisions/0017-predict-fun.md). Canales `/ws/predict` y `/ws/predict-engines` ([protocol.md](../architecture/protocol.md#canales-wspredict-y-wspredict-engines-predictfun)).
 
 **Objetivo**: ver y operar en papel las rondas BTC Up/Down de 5 minutos de [Predict.fun](https://dev.predict.fun) (BNB Chain, colateral USDT) **igual que las de Polymarket**:
 - la misma gráfica, con tooltip de hora y precios;
-- los mismos motores A, C, D y E con sus mismas reglas, alimentados con el flujo de Binance de cada fuente (spot y futures);
+- los mismos motores A y C con sus mismas reglas, alimentados con el flujo de Binance de cada fuente (spot y futures);
 - la misma tabla de markets guardados y el mismo drawer de motores.
 
 La diferencia es que los motores se basan en el **precio puntual** de Chainlink y no en un TWAP.
@@ -27,7 +27,7 @@ La diferencia es que los motores se basan en el **precio puntual** de Chainlink 
 El WS manda un heartbeat cada 15 s que hay que devolver, o cierra la conexión. Ante el aviso `system` (reinicio del servidor) se reconecta y se rehacen las suscripciones.
 
 ## Servidor (`apps/server/src/predict/`)
-Se reutiliza **la pila completa de Polymarket**: `PolymarketTracker`, `PmFeed`, `TimedEngine` (A y C), `FastRunner` (D y E con papel realista), `MarketStore` y los mismos mensajes. Para eso hay adaptadores:
+Se reutiliza **la pila completa de Polymarket**: `PolymarketTracker`, `PmFeed`, `TimedEngine` (A y C), `PmBooks` (libro para las compras reales), `MarketStore` y los mismos mensajes. Para eso hay adaptadores:
 - `api.ts`: `PredictMarketApi` implementa la `PolymarketApi` del tracker con las rondas del REST. Tiene una caché de 2 s compartida por las dos fuentes. Los tokens son sintéticos: `<marketId>:up` / `<marketId>:down`.
 - `book.ts`: `PredictBook` implementa el `BookLike` del tracker:
   - el primer libro de cada conexión sale como `book` y los siguientes como cambios de nivel (`level`, con `diffLevels`);
@@ -59,7 +59,7 @@ Polymarket no cambia: los campos nuevos son opcionales y por defecto valen lo de
 - Las compras reales de Polymarket no se dibujan en Predict: los slugs coinciden, así que se filtran por mercado.
 
 ## Compras reales
-Siguen al motor A, C o D de una fuente, con el mismo interruptor por market que en Polymarket (`TRADING_PASSWORD`; se apaga solo al terminar el market). Canal `/ws/predict-trading`, `POST /api/predict/trading/arm`.
+Siguen al motor A o C de una fuente, con el mismo interruptor por market que en Polymarket (`TRADING_PASSWORD`; se apaga solo al terminar el market). Canal `/ws/predict-trading`, `POST /api/predict/trading/arm`.
 - **Cuenta** (`predict/account.ts`, común a las fuentes):
   - Firma con `@predictdotfun/sdk` (EIP-712). Con una EOA basta `PREDICT_PRIVATE_KEY`. Con la **cuenta de Predict** (la smart wallet de la web) hacen falta `PREDICT_ACCOUNT` (su dirección, en predict.fun/portfolio) y `PREDICT_PRIVATE_KEY` (la clave de la wallet de Privy, que se exporta en predict.fun/account/settings).
   - Al arrancar **solo lee** de la cadena: que la wallet es dueña de la cuenta, las aprobaciones para operar y el saldo USDT (cada minuto).
@@ -67,7 +67,6 @@ Siguen al motor A, C o D de una fuente, con el mismo interruptor por market que 
 - **Aprobaciones**: `npm run predict:approvals -w @updown/server` las comprueba; con `-- --send` envía las que falten (una transacción por aprobación, con gas en BNB). Sin ellas el interruptor está desactivado.
 - **Órdenes** (`predict/liveTrader.ts`): orden MARKET del SDK sobre el libro del lado que se opera (el de Down es el espejo del de Up). La compra va por importe (`valueWei`, `isMinAmountOut`) y la venta por cantidad.
   - Deslizamiento de A y C: `PREDICT_LIVE_SLIPPAGE_BPS` (5 %) sobre el peor nivel que se consume.
-  - D usa su `limit`: el deslizamiento se calcula para que el peor precio firmado no lo supere, y si el libro ya está por encima, no se envía.
 - **Mínimo**: una compra **nunca baja de 1 USDT**, el mínimo de Predict (`PREDICT_LIVE_MIN_USD` no puede ser menor). El SDK redondea hacia abajo (1 USDT firma 0,999972), así que `buyAmountsAtLeast` sube el presupuesto de centavo en centavo hasta que lo firmado llegue al mínimo. Si no llega, no se envía. Una venta admite desde 0,01 shares. Modos de importe:
   - Proporcional: paper × `PREDICT_LIVE_SCALE`, entre el mínimo y `PREDICT_LIVE_MAX_USD`.
   - Mínimo.

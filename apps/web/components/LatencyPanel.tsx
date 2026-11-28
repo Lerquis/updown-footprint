@@ -3,10 +3,11 @@
 import { useEffect, useState } from "react";
 import type { LatencyProbe, LatencyProbeId, LatencySample } from "@updown/protocol";
 import { Badge } from "@/components/ui/badge";
-import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { exchangeClock } from "@/lib/exchangeClock";
 import type { LatencyView } from "@/lib/useLatency";
 import { LiveBadge } from "./LiveBadge";
+import { Panel } from "./Panel";
+import { useAsset } from "@/lib/source";
 import { MakerProbeCard } from "./MakerProbeCard";
 import { VENUES, type Venue } from "@/lib/venue";
 
@@ -21,7 +22,7 @@ const PROBES: { id: LatencyProbeId; label: string; help: string }[] = [
 
 const fmtMs = (ms: number | null) => (ms === null ? "–" : `${Math.round(ms)} ms`);
 /** verde < 250 ms · amarillo < 500 ms · rojo */
-const tone = (ms: number | null) => (ms === null ? "text-muted-foreground" : ms < 250 ? "text-buy" : ms < 500 ? "text-yellow-500" : "text-sell");
+const tone = (ms: number | null) => (ms === null ? "text-muted-foreground" : ms < 250 ? "text-buy" : ms < 500 ? "text-warn" : "text-sell");
 const fmtTime = (t: number) => new Date(t).toLocaleTimeString("es", { hour12: false });
 
 function median(xs: number[]): number | null {
@@ -100,7 +101,7 @@ function ProbeStat({ label, help, p }: { label: string; help: string; p: Latency
       <span className="text-[11px] text-muted-foreground">{label}</span>
       <span className={`font-mono text-sm font-semibold ${tone(p?.ms ?? null)}`}>
         {fmtMs(p?.ms ?? null)}
-        {status != null && status !== 200 && <span className="ml-1 text-[10px] font-normal text-yellow-500">HTTP {status}</span>}
+        {status != null && status !== 200 && <span className="ml-1 text-[10px] font-normal text-warn">HTTP {status}</span>}
       </span>
       {p?.detail && <span className="max-w-48 truncate text-[10px] text-muted-foreground">{p.detail}</span>}
     </div>
@@ -128,32 +129,37 @@ export function LatencyPanel({ lat, venue = "polymarket" }: { lat: LatencyView; 
   const probes = PROBES.map((p) => ({ ...p, ...(v.probes?.[p.id] ?? {}) }));
   const last = lat.history.at(-1) ?? null;
   const ests = lat.history.map((s) => s.estimateMs).filter((v): v is number => v !== null);
+  const asset = useAsset();
 
   return (
-    <Card className="gap-0 py-0">
-      <CardHeader className="border-b py-3">
-        <CardTitle>{v.latencyTitle}</CardTitle>
-        <CardDescription>
+    <Panel
+      id={`${asset}.${venue}.latency`}
+      title={v.latencyTitle}
+      description={
+        <>
           {v.latencyDesc}
           {lat.target && ` Destino: ${lat.target}.`}
-        </CardDescription>
-        <CardAction className="flex items-center gap-2">
+        </>
+      }
+      actions={
+        <>
           {lat.region && (
-            <Badge variant="outline" title="Desde dónde mide el servidor (región de Railway o tu PC)">
+            <Badge variant="outline" className="h-6 rounded-full" title="Desde dónde mide el servidor (región de Railway o tu PC)">
               {lat.region === "local" ? "Desde: local" : `Desde: ${lat.region}`}
             </Badge>
           )}
           <LiveBadge label="Latencia" link={lat.link} upstream={lat.upstream} />
-        </CardAction>
-      </CardHeader>
-      <CardContent className="flex flex-wrap items-center gap-x-8 gap-y-4 px-4 py-3">
+        </>
+      }
+    >
+      <div className="flex flex-wrap items-center gap-x-8 gap-y-4 px-4 py-4 sm:px-5">
         <MeasureClock last={last?.time ?? null} intervalMs={lat.intervalMs} />
         <div
           className="flex flex-col"
           title="Preparar la orden + POST /order por la conexión HTTP/2 ya abierta (como un bot conectado, con el precio del libro por WebSocket). Si falla, GET autenticado o ping"
         >
           <span className="text-[11px] text-muted-foreground">Orden estimada</span>
-          <span className={`font-mono text-2xl font-semibold ${tone(last?.estimateMs ?? null)}`}>{fmtMs(last?.estimateMs ?? null)}</span>
+          <span className={`font-mono text-3xl font-semibold tracking-tight ${tone(last?.estimateMs ?? null)}`}>{fmtMs(last?.estimateMs ?? null)}</span>
           {last && <Breakdown s={last} name={v.badge.toLowerCase()} />}
         </div>
         <div className="flex flex-wrap gap-x-6 gap-y-2">
@@ -169,13 +175,9 @@ export function LatencyPanel({ lat, venue = "polymarket" }: { lat: LatencyView; 
           </span>
           <Sparkline history={lat.history} />
         </div>
-      </CardContent>
-      {!lat.authReady && lat.link === "open" && (
-        <p className="border-t px-4 py-1.5 text-[11px] text-yellow-500">
-          {v.noAuthText}
-        </p>
-      )}
+      </div>
+      {!lat.authReady && lat.link === "open" && <p className="border-t px-4 py-2 text-[11px] text-warn sm:px-5">{v.noAuthText}</p>}
       {venue === "polymarket" && <MakerProbeCard lat={lat} />}
-    </Card>
+    </Panel>
   );
 }

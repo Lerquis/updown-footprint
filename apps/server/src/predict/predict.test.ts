@@ -97,7 +97,7 @@ test("modelo sin TWAP: precio puntual, varianza sigma²·tau", () => {
   assert.ok(modelProbUp({ x: 90, k: 100, tau: 0, sigma: 1, tailAvg: null, flow: 0 }, cfg) < 0.01);
 });
 
-import { predictBuyUsd, sharesToWei, slippageForLimit, usdToWei, walletFill, PREDICT_MIN_BUY_USD } from "./liveTrader.js";
+import { predictBuyUsd, sharesToWei, usdToWei, walletFill, PREDICT_MIN_BUY_USD } from "./liveTrader.js";
 import { buildPredictProbeOrder, PREDICT_PROBE_SIGNATURE } from "./latency.js";
 
 test("compras reales: nunca por debajo del minimo de Predict (1 USDT)", () => {
@@ -117,8 +117,6 @@ test("compras reales: importes en wei y deslizamiento del limite de D", () => {
   assert.equal(usdToWei(2.57), 2570000000000000000n);
   assert.equal(sharesToWei(1.23456), 1234000000000000000n);
   // limite 0.60 con el peor nivel a 0.57: 1 - 0.57/0.60 = 5 % (lo justo para no pasar del limite)
-  assert.equal(slippageForLimit(0.6, 0.57), 500); // 0.57 / 0.95 = 0.60: justo el limite
-  assert.equal(slippageForLimit(0.5, 0.57), 0);
 });
 
 test("compras reales: ejecucion desde el evento de la wallet (comision en tokens o en USDT)", () => {

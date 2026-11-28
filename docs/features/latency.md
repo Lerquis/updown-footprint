@@ -47,14 +47,13 @@ Retraso de matching: algunos markets responden `status: "delayed"` y casan tras 
 
 `auth` y `order` necesitan `PM_SIGNER_ADDRESS` (EOA que creó la API key: **Signer Address** en polymarket.com → Settings → API keys). Sin ella responden 401 (`missing address header`). La UI lo avisa.
 
-## Check maker: órdenes límite reales (motor E)
-La sonda de arriba mide una orden que **compra al instante** (taker), que además Polymarket retiene antes de ejecutar. El [motor E](predictive-engines.md) usa órdenes **límite en reposo** (maker), que no casan al llegar y no pasan por esa retención. El check mide ese ciclo con **órdenes reales y pequeñas** que siguen las señales del motor elegido (A, C o D) y **se activa a mano**.
+## Check maker: órdenes límite reales
+La sonda de arriba mide una orden que **compra al instante** (taker), que además Polymarket retiene antes de ejecutar. Las órdenes **límite en reposo** (maker) no casan al llegar y no pasan por esa retención. El check mide ese ciclo con **órdenes reales y pequeñas** que siguen las señales del motor elegido (A o C) y **se activa a mano**.
 
 **Cada señal del motor:**
 - **Compra:** compra post-only a **mejor bid + 1 tick**, primera de la fila en un nivel nuevo. Si el spread es de 1 tick, se une al mejor bid.
   - Importe: **máx(1 USDC, 5 tokens)**. Polymarket exige 5 tokens; a 0,60 son 3 USDC.
   - Se cancela a los **2 s** (`PM_MAKER_CHECK_REST_MS`) si no se llenó entera.
-  - Con el motor D, si el precio maker supera el límite de su señal, se omite.
 - **Venta:** lo mismo en el ask (mejor ask − 1 tick), con los tokens que el check compró en ese market (si hay al menos 5). Lo que no se vende lo liquida Polymarket al cierre.
 - Un lado con una orden en curso no recibe otra: esa señal se omite.
 

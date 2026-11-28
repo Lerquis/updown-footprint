@@ -38,10 +38,11 @@ export class ChainlinkTwapClient extends EventEmitter<ChainlinkEvents> {
     creds: PolyBoltCredentials,
     private readonly symbol = "btcusd",
     private readonly windowSeconds = 60,
+    private readonly name = "chainlink-twap",
   ) {
     super();
     // pingMs = 0: el servidor manda pings de protocolo; no hay PING de texto.
-    this.ws = new ReconnectingWs("chainlink-twap", url, () => [{ op: "auth", rid: "a1", auth: creds }], 0);
+    this.ws = new ReconnectingWs(name, url, () => [{ op: "auth", rid: "a1", auth: creds }], 0);
     this.ws.on("state", (s) => {
       // "connected" del socket aun no significa autenticado: esperamos a la suscripcion
       this.setState(s === "connected" ? "connecting" : s);
@@ -66,7 +67,7 @@ export class ChainlinkTwapClient extends EventEmitter<ChainlinkEvents> {
       this.setState("connected");
     } else if (m.op === "error") {
       // nunca se loguean las credenciales; solo el codigo del servidor
-      console.error(`[chainlink-twap] server error: ${m.code ?? "unknown"}`);
+      console.error(`[${this.name}] server error: ${m.code ?? "unknown"}`);
       // Credenciales/ticket rechazados: reintentar cada segundo no sirve; se espera 30 s antes de volver a probar.
       this.setState("reconnecting");
       this.ws.stop();

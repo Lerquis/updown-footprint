@@ -7,7 +7,7 @@ import { predictError, type PredictAccount } from "./account.js";
 import { parseToken, type PredictTradingInfo } from "./model.js";
 
 /**
- * Compras/ventas REALES en Predict.fun siguiendo al motor elegido (A, C o D) de UNA fuente, igual que `LiveTrader` en Polymarket
+ * Compras/ventas REALES en Predict.fun siguiendo al motor elegido (A o C) de UNA fuente, igual que `LiveTrader` en Polymarket
  * (interruptor por market con `TRADING_PASSWORD`, topes por orden y por market, importe proporcional o minimo). Diferencias:
  *  - Orden MARKET del SDK (`getMarketOrderAmounts` sobre el libro del lado que se opera; el de Down es el espejo del de Up):
  *    compra por importe (`valueWei`, `isMinAmountOut`), venta por cantidad. Nunca queda en el libro.
@@ -74,15 +74,6 @@ export function buyAmountsAtLeast<A extends { makerAmount: bigint }>(amountsFor:
     if (amounts.makerAmount >= min) return { amounts, usd: v };
   }
   return null;
-}
-
-/**
- * Deslizamiento (bps) para que el peor precio firmado no pase del limite del motor D. Con `isMinAmountOut` el SDK firma
- * peor nivel / (1 - deslizamiento): bps = (1 - peor nivel / limite) x 10000. 0 si el limite ya es el peor nivel o menos.
- */
-export function slippageForLimit(limit: number, worstPrice: number): number {
-  if (limit <= 0 || worstPrice <= 0 || limit <= worstPrice) return 0;
-  return Math.max(0, Math.min(9999, Math.floor((1 - worstPrice / limit) * 10000)));
 }
 
 /** Ejecucion de un evento `orderTransactionSuccess`: tokens netos (la comision de una compra se cobra en tokens), USDT y comision */
@@ -181,7 +172,7 @@ export class PredictLiveTrader extends EventEmitter<Events> {
 
   /** Activa/desactiva en el market en curso. Al activar inicia sesion (JWT) si hace falta. Devuelve un error legible o null. */
   async setArmed(slug: string, armed: boolean, opts: { engine?: LiveEngine; sizing?: LiveSizing } = {}): Promise<string | null> {
-    if (opts.engine === "a" || opts.engine === "c" || opts.engine === "d") this.engine = opts.engine;
+    if (opts.engine === "a" || opts.engine === "c") this.engine = opts.engine;
     if (opts.sizing === "scaled" || opts.sizing === "min") this.sizing = opts.sizing;
     if (!armed) {
       if (this.armedSlug) this.disarm("apagado por el usuario");
@@ -260,7 +251,7 @@ export class PredictLiveTrader extends EventEmitter<Events> {
       paperAmount: s.amount,
       requestedUsd: null,
       requestedShares: null,
-      limitPrice: s.limit ?? (s.action === "buy" ? 0.99 : 0.01),
+      limitPrice: s.action === "buy" ? 0.99 : 0.01,
       sentAt: null,
       respondedAt: null,
       latencyMs: null,
@@ -291,14 +282,7 @@ export class PredictLiveTrader extends EventEmitter<Events> {
         if (usd === null) return this.publish({ ...base, detail: `fuera de limites (gastado ${round(this.spentUsd, 2)} de ${this.c.maxMarketUsd} USDT en el market; minimo ${Math.max(PREDICT_MIN_BUY_USD, this.c.minUsd)} USDT)` });
         base.requestedUsd = usd;
         const valueWei = usdToWei(usd);
-        // D: el peor precio firmado no pasa de su limite; A y C: deslizamiento configurado
-        let slippageBps = BigInt(this.c.slippageBps);
-        if (s.limit !== undefined) {
-          const probe = b.getMarketOrderAmounts({ side: Side.BUY, valueWei, slippageBps: 0n, isMinAmountOut: true }, sdkBook);
-          const worst = Number(probe.lastPrice) / 1e18;
-          if (worst > s.limit) return this.publish({ ...base, detail: `el libro (${worst}) supera el limite del motor (${s.limit})` });
-          slippageBps = BigInt(slippageForLimit(s.limit, worst));
-        }
+        const slippageBps = BigInt(this.c.slippageBps);
         // nunca por debajo del minimo de Predict: el SDK redondea hacia abajo
         const ok = buyAmountsAtLeast((v) => b.getMarketOrderAmounts({ side: Side.BUY, valueWei: v, slippageBps, isMinAmountOut: true }, sdkBook), usd, this.c.minUsd);
         if (!ok) return this.publish({ ...base, detail: `no se llega al minimo de ${Math.max(PREDICT_MIN_BUY_USD, this.c.minUsd)} USDT con el libro actual` });

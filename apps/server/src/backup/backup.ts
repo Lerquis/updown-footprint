@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { rename, rm, stat } from "node:fs/promises";
 import { createReadStream, createWriteStream } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { Worker } from "node:worker_threads";
 import { createGunzip, createGzip } from "node:zlib";
@@ -111,7 +111,8 @@ export class DbBackup {
   ) {
     this.s3 = new S3Lite(cfg.s3);
     this.stampFile = `${dbPath}.last-backup`;
-    this.tmpDir = join(dirname(dbPath), "backup-tmp");
+    // una carpeta por base: varias fuentes comparten `data/` y hacen el backup a la vez
+    this.tmpDir = join(dirname(dbPath), "backup-tmp", basename(dbPath));
   }
 
   private key(name: string) {

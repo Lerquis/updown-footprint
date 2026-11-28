@@ -2,6 +2,7 @@
 
 import { useEffect, useRef } from "react";
 import type { AggTrade, DepthColumn, OrderflowSignal } from "@updown/protocol";
+import { chartMono } from "@/lib/chartFont";
 import { attachViewInteractions } from "@/lib/chartInteractions";
 import type { ChartView } from "@/lib/chartView";
 import { BUY_RGB, SELL_RGB, SIGNAL_INFO, biasArrow, biasRgb, fmtClockHMS } from "@/lib/flow";
@@ -26,7 +27,8 @@ interface Props extends ChartLayers {
 
 export const PAD_RIGHT = 72;
 export const PAD_BOTTOM = 22;
-const FONT = "11px ui-monospace, Consolas, monospace";
+/** fuente de los ejes; se fija al montar con la de la pagina (chartMono) */
+let FONT = "11px ui-monospace, Consolas, monospace";
 /** El heatmap se repinta como mucho cada HEAT_REFRESH ms; entre repintados se desplaza la imagen cacheada. */
 const HEAT_REFRESH = 100;
 /** Tope de burbujas por frame: con ventanas largas solo se dibujan las de mayor volumen. */
@@ -61,6 +63,8 @@ export function BookmapChart(props: Props) {
   propsRef.current = props;
 
   useEffect(() => {
+    const mono = chartMono();
+    FONT = `11px ${mono}`;
     const canvas = canvasRef.current!;
     const ctx = canvas.getContext("2d")!;
     const cache: HeatCache = { canvas: document.createElement("canvas"), end: 0, lo: 0, hi: 0, w: 0, h: 0, win: 0, ncols: -1, ref: 0 };
@@ -140,7 +144,7 @@ export function BookmapChart(props: Props) {
     };
 
     const tag = (text: string, x: number, y: number, rgb: string) => {
-      ctx.font = "bold 10px ui-monospace, Consolas, monospace";
+      ctx.font = `bold 10px ${mono}`;
       ctx.lineWidth = 3;
       ctx.strokeStyle = "rgba(0,0,0,0.75)";
       ctx.strokeText(text, x, y);
@@ -198,7 +202,7 @@ export function BookmapChart(props: Props) {
         lo = mid - span / 2;
         hi = mid + span / 2;
       } else {
-        ctx.fillStyle = "#5e6673";
+        ctx.fillStyle = "#6b6b6b";
         ctx.font = FONT;
         ctx.fillText("Sin datos en esta vista…", 16, 24);
         return;
@@ -232,11 +236,11 @@ export function BookmapChart(props: Props) {
 
       ctx.font = FONT;
       ctx.lineWidth = 1;
-      const grid = heatmap ? "rgba(255,255,255,0.08)" : "#1e2329";
+      const grid = heatmap ? "rgba(255,255,255,0.08)" : "#1f1f1f";
 
       // Grilla horizontal + etiquetas de precio
       ctx.strokeStyle = grid;
-      ctx.fillStyle = "#848e9c";
+      ctx.fillStyle = "#8f8f8f";
       for (let i = 0; i <= 5; i++) {
         const p = lo + ((hi - lo) * i) / 5;
         const yy = Math.round(y(p)) + 0.5;
@@ -265,7 +269,7 @@ export function BookmapChart(props: Props) {
 
       // Linea de precio escalonada (con muchos puntos se submuestrea)
       if (vis.length) {
-        ctx.strokeStyle = heatmap ? "rgba(255,255,255,0.7)" : "#5e6673";
+        ctx.strokeStyle = heatmap ? "rgba(255,255,255,0.7)" : "#6b6b6b";
         ctx.beginPath();
         const stride = Math.max(1, Math.floor(vis.length / (pw * 2)));
         let prevY = 0;
@@ -385,12 +389,12 @@ export function BookmapChart(props: Props) {
           const price = col.lo + (i + 0.5) * step;
           if (price < lo || price > hi) return;
           const text = `${buy ? "Zona caliente de compra" : "Zona caliente de venta"} · ≈ $${compact.format(col.q[i]! * price)}`;
-          ctx.font = "bold 11px ui-monospace, Consolas, monospace";
+          ctx.font = `bold 11px ${mono}`;
           const tw = ctx.measureText(text).width + 14;
           const tx = pw - tw - 8;
           const ty = Math.max(11, Math.min(ph - 11, y(price) + nudge));
           const c = buy ? BUY_RGB : SELL_RGB;
-          ctx.fillStyle = "rgba(11,14,17,0.85)";
+          ctx.fillStyle = "rgba(10,10,10,0.85)";
           ctx.fillRect(tx, ty - 9, tw, 18);
           ctx.strokeStyle = `rgba(${c},1)`;
           ctx.strokeRect(tx + 0.5, ty - 8.5, tw - 1, 17);
@@ -410,22 +414,22 @@ export function BookmapChart(props: Props) {
         const ly = Math.round(y(last.price)) + 0.5;
         if (ly >= 8 && ly <= ph) {
           ctx.setLineDash([4, 4]);
-          ctx.strokeStyle = "#f0b90b";
+          ctx.strokeStyle = "rgba(245,245,245,0.85)";
           ctx.beginPath();
           ctx.moveTo(0, ly);
           ctx.lineTo(pw, ly);
           ctx.stroke();
           ctx.setLineDash([]);
-          ctx.fillStyle = "#f0b90b";
+          ctx.fillStyle = "#f5f5f5";
           ctx.fillRect(pw, ly - 8, PAD_RIGHT, 16);
-          ctx.fillStyle = "#0b0e11";
+          ctx.fillStyle = "#0a0a0a";
           ctx.fillText(last.price.toFixed(2), pw + 6, ly + 4);
         }
       }
 
       if (!live) {
-        ctx.fillStyle = "rgba(240,185,11,0.95)";
-        ctx.font = "bold 11px ui-monospace, Consolas, monospace";
+        ctx.fillStyle = "rgba(245,245,245,0.92)";
+        ctx.font = `bold 11px ${mono}`;
         ctx.fillText("Vista histórica · doble clic para volver en vivo", 10, 16);
         ctx.font = FONT;
       }
@@ -439,5 +443,5 @@ export function BookmapChart(props: Props) {
     };
   }, []);
 
-  return <canvas ref={canvasRef} className="block h-[420px] w-full select-none bg-[#0b0e11]" />;
+  return <canvas ref={canvasRef} className="block h-[320px] w-full select-none bg-screen sm:h-[420px]" />;
 }

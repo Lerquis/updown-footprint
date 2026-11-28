@@ -10,6 +10,7 @@ import {
   type EnginesServerMessage,
   type LatencyServerMessage,
   type MakerProbeRequest,
+  type MarketAsset,
   type MarketSource,
   type OrderflowServerMessage,
   type PmDecision,
@@ -17,6 +18,10 @@ import {
   type PmEngineInfo,
   type PmEngineThresholds,
   type PmMarketsResponse,
+  type PmRecord,
+  type PmRef,
+  type PmRefPoint,
+  type PmStrengthSet,
   type PolymarketServerMessage,
   type TradingArmRequest,
   type TradingServerMessage,
@@ -40,22 +45,51 @@ import type { ChainlinkClient } from "./polymarket/chainlinkClient.js";
 import type { ChainlinkTwapClient } from "./polymarket/chainlinkTwapClient.js";
 import { PolymarketTracker, slotStart } from "./polymarket/tracker.js";
 import { ENGINE_VERSION, MarketStore } from "./polymarket/store.js";
-import { serverFast, serverStrategy } from "./polymarket/serverStrategy.js";
-import { FastRunner, scheduleFast } from "./polymarket/fastRunner.js";
+import { serverStrategy } from "./polymarket/serverStrategy.js";
+import { PmBooks } from "./polymarket/pmBook.js";
 import { DbBackup, type BackupConfig } from "./backup/backup.js";
 import { PmFeed, scheduleEngine, TimedEngine } from "./polymarket/timedEngine.js";
 import type { LatencyMonitor } from "./polymarket/latency.js";
 import { LiveTrader } from "./polymarket/liveTrader.js";
 import { MakerProbe } from "./polymarket/makerProbe.js";
+import { detectStrengthSet, tokenMid, withRefMove } from "./polymarket/strength.js";
 // [PREDICT desactivado] import type { PredictMarketApi } from "./predict/api.js";
 // [PREDICT desactivado] import { createPredictVenue, type PredictVenue } from "./predict/venue.js";
 // [PREDICT desactivado] import type { PredictWs } from "./predict/wsClient.js";
 // [PREDICT desactivado] import type { PredictAccount } from "./predict/account.js";
 // [PREDICT desactivado] import type { PredictLatencyMonitor } from "./predict/latency.js";
 
+/** Lo que cambia entre activos (ADR 0018): simbolos y tamanos de precio/volumen; el resto de parametros es comun */
+export interface AssetMarket {
+  /** simbolo de Binance en minusculas (btcusdt) */
+  symbol: string;
+  /** simbolo de la API crypto-price de Polymarket (BTC) y prefijo de los slugs (btc-updown-5m) */
+  pmSymbol: string;
+  pmSlugPrefix: string;
+  /** bucket de precio del heatmap y nivel del footprint (activo cotizado) */
+  depthStep: number;
+  footprintTick: number;
+  /** volumen minimo (activo base) de un nivel para contar como desequilibrio */
+  imbalanceMinVol: number;
+  /** SS (movimientos con fuerza del motor C, docs/features/sol-strength.md): se calcula y se sirve con los markets */
+  strength?: boolean;
+}
+
+/** Tokens Up/Down (1 s) del market de otra fuente (BTC) para compararlos con los de esta (SS). Lo expone cada fuente como `refFeed`. */
+export interface RefFeed {
+  /** activo (BTC) */
+  label: string;
+  /** tokens de 1 s en [start, end]: muestras del motor A del market de esa ventana (memoria o base); vacio si no esta */
+  series(start: number, end: number): PmRefPoint[];
+  /** cada muestra de 1 s nueva */
+  onPoint(fn: (p: PmRefPoint) => void): void;
+}
+
 /** Como se conecta una fuente a Binance y donde guarda lo suyo */
 export interface SourceOptions {
   id: MarketSource;
+  asset: MarketAsset;
+  market: AssetMarket;
   /** WS de aggTrades y del libro (en futuros son rutas distintas) */
   tradesWsUrl: string;
   depthWsUrl: string;
@@ -68,6 +102,8 @@ export interface SourceOptions {
   legacyDbPath: string | null;
   /** backups de esta base (null = desactivados) */
   backup: (BackupConfig & { enabled: boolean; restore: boolean; shutdownTimeoutMs: number }) | null;
+  /** referencia para SS (la fuente BTC del mismo tipo); solo con `market.strength` */
+  reference?: RefFeed;
   // [PREDICT desactivado] /** base de los markets de Predict de esta fuente y sus backups */
   // [PREDICT desactivado] predictDbPath: string;
   // [PREDICT desactivado] predictBackup: (BackupConfig & { enabled: boolean; restore: boolean; shutdownTimeoutMs: number }) | null;
@@ -81,48 +117,59 @@ export interface SharedDeps {
   // [PREDICT desactivado] predict: { api: PredictMarketApi; price: PredictWs; account: PredictAccount; latency: PredictLatencyMonitor } | null;
 }
 
-/** Ruta HTTP/WS sin la fuente: `/ws/futures/x` -> futures + `/ws/x`; el resto es spot. Funcion pura. */
-export function splitSource(pathname: string): { source: MarketSource; path: string } {
-  const m = /^\/(ws|api)\/futures(\/.*)$/.exec(pathname);
-  return m ? { source: "futures", path: `/${m[1]}${m[2]}` } : { source: "spot", path: pathname };
+/**
+ * Ruta HTTP/WS sin el activo ni la fuente (inversa de `sourcePath`): `/ws/eth/futures/x` -> eth + futures + `/ws/x`,
+ * `/ws/futures/x` -> btc + futures, `/ws/eth/x` -> eth + spot; el resto es btc spot. Funcion pura.
+ */
+export function splitSource(pathname: string): { asset: MarketAsset; source: MarketSource; path: string } {
+  const m = /^\/(ws|api)(\/eth)?(\/futures)?(\/.*)$/.exec(pathname);
+  if (!m || (!m[2] && !m[3])) return { asset: "btc", source: "spot", path: pathname };
+  return { asset: m[2] ? "eth" : "btc", source: m[3] ? "futures" : "spot", path: `/${m[1]}${m[4]}` };
+}
+
+/** Clave de una fuente en los mapas del servidor y prefijo de sus logs ("" = BTC spot, "futures", "eth", "eth-futures") */
+export function sourceLabel(asset: MarketAsset, source: MarketSource): string {
+  return [asset === "btc" ? null : asset, source === "spot" ? null : source].filter(Boolean).join("-");
 }
 
 const TIMED_IDS = ["a", "c"] as const;
 type TimedId = (typeof TIMED_IDS)[number];
-const ENGINE_IDS: PmEngineId[] = ["a", "c", "d", "e"];
+const ENGINE_IDS: PmEngineId[] = ["a", "c"];
 
 export type Source = Awaited<ReturnType<typeof createSource>>;
 
 /**
- * Una fuente completa (ADR 0016): Binance (trades, libro, orderflow, escenarios) -> motores A, C, D y E -> su base, sus backups,
+ * Una fuente completa (ADR 0016): Binance (trades, libro, orderflow, escenarios) -> motores A y C -> su base, sus backups,
  * sus compras reales y sus canales. Se crea una vez por fuente; nada de aqui se comparte entre fuentes salvo `shared`.
  * Llamar a `start()` cuando el servidor HTTP escuche.
  */
 export async function createSource(opts: SourceOptions, shared: SharedDeps) {
   const { chainlink, latencyMonitor } = shared;
-  const SYMBOL = config.symbol.toUpperCase();
-  /** prefijo de los logs: spot mantiene los de siempre ([binance]); futures los marca ([futures:binance]) */
-  const tag = (name: string) => (opts.id === "spot" ? name : `${opts.id}:${name}`);
+  const mk = opts.market;
+  const SYMBOL = mk.symbol.toUpperCase();
+  /** prefijo de los logs: BTC spot mantiene los de siempre ([binance]); el resto los marca ([futures:binance], [eth-futures:binance]) */
+  const label = sourceLabel(opts.asset, opts.id);
+  const tag = (name: string) => (label ? `${label}:${name}` : name);
 
   // ── Estado y motores ──
   const buffer = new TradeBuffer(config.retentionMs, config.tradesMax);
-  const upstream = new AggTradeClient(opts.tradesWsUrl, config.symbol, tag("binance"));
+  const upstream = new AggTradeClient(opts.tradesWsUrl, mk.symbol, tag("binance"));
 
   const book = new OrderBook();
   const depthHistory = new DepthHistory(config.depthHistory);
-  const depthClient = new DepthClient(opts.depthWsUrl, opts.restUrl, config.symbol, book, opts.depthSnapshotLimit, opts.depthMode, tag("depth"));
+  const depthClient = new DepthClient(opts.depthWsUrl, opts.restUrl, mk.symbol, book, opts.depthSnapshotLimit, opts.depthMode, tag("depth"));
 
   const engine = new OrderflowEngine({
     barMs: config.barMs,
     barHistory: config.barHistory,
-    tick: config.footprintTick,
+    tick: mk.footprintTick,
     retentionMs: config.retentionMs,
     detector: {
       ...DEFAULT_DETECTOR,
-      tick: config.footprintTick,
+      tick: mk.footprintTick,
       barMs: config.barMs,
       imbalanceRatio: config.imbalanceRatio,
-      imbalanceMinVol: config.imbalanceMinVol,
+      imbalanceMinVol: mk.imbalanceMinVol,
       imbalanceMinStack: config.imbalanceMinStack,
     },
   });
@@ -182,41 +229,26 @@ export async function createSource(opts: SourceOptions, shared: SharedDeps) {
       .catch((e) => console.error(`[backup] no se pudo archivar la base anterior: ${e instanceof Error ? e.message : e}`));
 
   const strategy = serverStrategy();
-  const fast = serverFast();
   const timedThresholds: PmEngineThresholds = { minEdge: strategy.minEdge, exitMargin: strategy.exitMargin, maxSpread: strategy.maxSpread, warmupS: strategy.warmupS, noEntryS: strategy.noEntryS };
   const engineInfo: PmEngineInfo[] = [
-    ...TIMED_IDS.map((id) => ({ id, mode: id === "a" ? ("live" as const) : ("asOf" as const), delayMs: config.pmEngineDelayMs[id], kind: "taker" as const, thresholds: timedThresholds })),
-    {
-      id: "d",
-      mode: "fast",
-      delayMs: config.pmFast.tickMs,
-      kind: "taker",
-      thresholds: { minEdge: fast.predictive.minEdge, exitMargin: fast.predictive.exitMargin, maxSpread: fast.predictive.maxSpread, warmupS: fast.predictive.warmupS, noEntryS: fast.predictive.noEntryS },
-    },
-    {
-      id: "e",
-      mode: "fast",
-      delayMs: config.pmFast.tickMs,
-      kind: "maker",
-      thresholds: { minEdge: fast.maker.edge, exitMargin: fast.maker.exitEdge, maxSpread: 1, warmupS: fast.maker.warmupS, noEntryS: fast.maker.noEntryS },
-    },
+    ...TIMED_IDS.map((id) => ({ id, mode: id === "a" ? ("live" as const) : ("asOf" as const), delayMs: config.pmEngineDelayMs[id], thresholds: timedThresholds })),
   ];
   /** Parametros con los que se genera cada market guardado (para reproducirlo) */
   const engineParams = {
     source: opts.id,
+    asset: opts.asset,
     strategy,
-    fast: { predictive: fast.predictive, maker: fast.maker, drift: fast.drift, paper: config.pmFast.paper, tickMs: config.pmFast.tickMs },
     engines: engineInfo,
-    detector: { tick: config.footprintTick, barMs: config.barMs, imbalanceRatio: config.imbalanceRatio, imbalanceMinVol: config.imbalanceMinVol, imbalanceMinStack: config.imbalanceMinStack },
-    depth: { step: config.depthStep, rangePct: config.depthRangePct, intervalMs: config.depthIntervalMs },
+    detector: { tick: mk.footprintTick, barMs: config.barMs, imbalanceRatio: config.imbalanceRatio, imbalanceMinVol: mk.imbalanceMinVol, imbalanceMinStack: config.imbalanceMinStack },
+    depth: { step: mk.depthStep, rangePct: config.depthRangePct, intervalMs: config.depthIntervalMs },
   };
   const tracker = new PolymarketTracker(
-    new HttpPolymarketApi(config.pmGammaUrl, config.pmSiteUrl, config.pmSymbol, config.pmVariant, config.pmMarketMs, config.pmTwapSeconds),
+    new HttpPolymarketApi(config.pmGammaUrl, config.pmSiteUrl, mk.pmSymbol, config.pmVariant, config.pmMarketMs, config.pmTwapSeconds),
     { bars: () => engine.allBars(), cvd: () => engine.cvdPoints, signals: () => engine.signals },
     (tokens) => new BookClient(config.pmBookWsUrl, tokens),
     {
       marketMs: config.pmMarketMs,
-      slugPrefix: config.pmSlugPrefix,
+      slugPrefix: mk.pmSlugPrefix,
       historyMax: config.pmHistory,
       graceMs: 5000,
       retryMs: 3000,
@@ -234,28 +266,10 @@ export async function createSource(opts: SourceOptions, shared: SharedDeps) {
       new TimedEngine({ id, mode: id === "a" ? "live" : "asOf", delayMs: config.pmEngineDelayMs[id], strategy, retentionMs: config.retentionMs, decisionsMax }, feed),
     ]),
   ) as Record<TimedId, TimedEngine>;
-  // Motores D (predictivo, taker) y E (libro, maker): cada 100 ms con lo ultimo recibido (docs/features/predictive-engines.md)
-  const fastRunner = new FastRunner(
-    {
-      tickMs: config.pmFast.tickMs,
-      retentionMs: config.retentionMs,
-      decisionsMax,
-      twapSeconds: config.pmTwapSeconds,
-      predictive: fast.predictive,
-      maker: fast.maker,
-      drift: fast.drift,
-      paper: config.pmFast.paper,
-    },
-    feed,
-    () => {
-      if (!book.ready) return null;
-      const { bids, asks } = book.sides();
-      return { bids, asks, mid: (book.bestBid() + book.bestAsk()) / 2 };
-    },
-  );
-  /** Registro de decisiones de un motor, sea por segundo (A, C) o rapido (D, E) */
-  const engineTrack = (id: PmEngineId): { slug: string | null; decisions: PmDecision[] } =>
-    id === "d" || id === "e" ? { slug: fastRunner.slug, decisions: fastRunner.decisions[id].slice() } : { slug: engines3[id].slug, decisions: engines3[id].decisions.slice() };
+  // Libro L2 de los tokens de Polymarket (lo usa el check maker)
+  const books = new PmBooks();
+  /** Registro de decisiones de un motor */
+  const engineTrack = (id: PmEngineId): { slug: string | null; decisions: PmDecision[] } => ({ slug: engines3[id].slug, decisions: engines3[id].decisions.slice() });
   console.log(`[${tag("polymarket")}] db ${opts.dbPath}: ${marketStore.count()} markets completos guardados, ${marketStore.counts().trades} aggTrades, ${tracker.history.length} cargados`);
 
   // Los mismos motores sobre las rondas de Predict.fun (precio puntual, sin TWAP), con el flujo de esta fuente
@@ -268,11 +282,6 @@ export async function createSource(opts: SourceOptions, shared: SharedDeps) {
         // [PREDICT desactivado] clock,
         // [PREDICT desactivado] flow: { bars: () => engine.allBars(), cvd: () => engine.cvdPoints, signals: () => engine.signals },
         // [PREDICT desactivado] signals: () => engine.signals,
-        // [PREDICT desactivado] binanceBook: () => {
-          // [PREDICT desactivado] if (!book.ready) return null;
-          // [PREDICT desactivado] const { bids, asks } = book.sides();
-          // [PREDICT desactivado] return { bids, asks, mid: (book.bestBid() + book.bestAsk()) / 2 };
-        // [PREDICT desactivado] },
         // [PREDICT desactivado] api: shared.predict.api,
         // [PREDICT desactivado] price: shared.predict.price,
         // [PREDICT desactivado] account: shared.predict.account,
@@ -296,7 +305,7 @@ export async function createSource(opts: SourceOptions, shared: SharedDeps) {
   const depth = new Channel<DepthServerMessage>(() => ({
     type: "snapshot",
     symbol: SYMBOL,
-    step: config.depthStep,
+    step: mk.depthStep,
     retentionMs: config.retentionMs,
     columns: depthHistory.snapshot(),
     upstream: depthClient.state,
@@ -304,7 +313,7 @@ export async function createSource(opts: SourceOptions, shared: SharedDeps) {
   const orderflow = new Channel<OrderflowServerMessage>(() => ({
     type: "snapshot",
     symbol: SYMBOL,
-    tick: config.footprintTick,
+    tick: mk.footprintTick,
     barMs: config.barMs,
     retentionMs: config.retentionMs,
     bars: engine.allBars(),
@@ -321,6 +330,35 @@ export async function createSource(opts: SourceOptions, shared: SharedDeps) {
 
   /** Estado de Polymarket: conectado solo si lo estan el libro de tokens y el stream de Chainlink */
   const pmUpstream = (): UpstreamState => (tracker.upstream !== "connected" ? tracker.upstream : chainlink.state);
+  // ── SS (docs/features/sol-strength.md): se calcula al servir cada market a partir de las muestras del motor C; no se guarda ──
+  const ref = mk.strength ? opts.reference : undefined;
+  const refOf = (start: number, end: number): PmRef | undefined => (ref ? { label: ref.label, points: ref.series(start, end) } : undefined);
+  const strengthOf = (points: PmRecord["points"], start: number, r: PmRef | undefined): PmStrengthSet => {
+    const set = detectStrengthSet(points, start);
+    return r ? { sol: withRefMove(set.sol, r.points), base: withRefMove(set.base, r.points) } : set;
+  };
+  const ssCache = new Map<string, { key: string; extra: Pick<PmRecord, "strength" | "ref"> }>();
+  /** el market con su SS y su referencia (copia; el record del tracker no cambia: es el que se guarda) */
+  const withStrength = (rec: PmRecord): PmRecord => {
+    if (!mk.strength) return rec;
+    const c = rec.engines?.c?.points ?? [];
+    const key = `${c.length}`;
+    let hit = ssCache.get(rec.market.slug);
+    if (!hit || hit.key !== key) {
+      const r = refOf(rec.market.start, rec.market.end);
+      hit = { key, extra: { strength: strengthOf(c, rec.market.start, r), ...(r ? { ref: r } : {}) } };
+      // sin referencia todavia (p. ej. BTC aun no guardo ese tramo) no se cachea: se reintenta la proxima vez
+      if (!r || r.points.length) ssCache.set(rec.market.slug, hit);
+      if (ssCache.size > 300) ssCache.delete(ssCache.keys().next().value!);
+    }
+    return { ...rec, ...hit.extra };
+  };
+  const liveStrength = (): PmStrengthSet => {
+    const cur = tracker.current;
+    return cur ? strengthOf(tracker.live("c").points, cur.start, refOf(cur.start, cur.end)) : { sol: [], base: [] };
+  };
+  let lastStrength = "";
+
   const polymarket = new Channel<PolymarketServerMessage>(() => ({
     type: "snapshot",
     current: tracker.current,
@@ -329,12 +367,11 @@ export async function createSource(opts: SourceOptions, shared: SharedDeps) {
     trades: tracker.trades.slice(),
     engines: {
       c: { points: tracker.live("c").points.slice(), trades: tracker.live("c").trades.slice() },
-      d: { points: tracker.live("d").points.slice(), trades: tracker.live("d").trades.slice() },
-      e: { points: tracker.live("e").points.slice(), trades: tracker.live("e").trades.slice(), orders: (tracker.live("e").orders ?? []).slice() },
     },
-    history: tracker.history.slice(),
+    history: tracker.history.map(withStrength),
     historyMax: config.pmHistory,
     upstream: pmUpstream(),
+    ...(mk.strength && tracker.current ? { strength: liveStrength(), ref: refOf(tracker.current.start, tracker.current.end) } : {}),
   }));
 
   const engines = new Channel<EnginesServerMessage>(() => ({
@@ -344,7 +381,7 @@ export async function createSource(opts: SourceOptions, shared: SharedDeps) {
     decisions: Object.fromEntries(ENGINE_IDS.map((id) => [id, engineTrack(id)])) as Record<PmEngineId, { slug: string | null; decisions: PmDecision[] }>,
   }));
 
-  // Compras reales siguiendo al motor A, C o D DE ESTA FUENTE: solo con su interruptor activado y solo en el market en curso.
+  // Compras reales siguiendo al motor A o C DE ESTA FUENTE: solo con su interruptor activado y solo en el market en curso.
   // Cada fuente tiene su propio interruptor y su propio tope por market (misma cartera).
   const liveTrader = new LiveTrader(
     {
@@ -359,15 +396,15 @@ export async function createSource(opts: SourceOptions, shared: SharedDeps) {
   liveTrader.on("state", (state) => trading.broadcast({ type: "state", state }));
   liveTrader.on("trade", (trade) => trading.broadcast({ type: "trade", trade }));
 
-  // Check maker: ordenes maker reales (las del motor E) siguiendo al motor A, C o D de esta fuente, solo con el interruptor
+  // Check maker: ordenes maker reales siguiendo al motor A o C de esta fuente, solo con el interruptor
   const makerProbe = new MakerProbe(config.makerProbe, {
     trader: liveTrader,
     quote: (token) => {
-      const b = fastRunner.books.has(token) ? fastRunner.books.get(token) : null;
+      const b = books.has(token) ? books.get(token) : null;
       const q = b && b.time > 0 ? { bid: b.bestBid(), ask: b.bestAsk() } : feed.quote(token, Infinity);
       return { bid: q?.bid ?? null, ask: q?.ask ?? null };
     },
-    levelSize: (token, side, price) => (fastRunner.books.has(token) ? fastRunner.books.get(token).sizeAt(side, price) : 0),
+    levelSize: (token, side, price) => (books.has(token) ? books.get(token).sizeAt(side, price) : 0),
     now: () => clock.now(),
   });
   // La latencia al CLOB es la misma para las dos fuentes (un solo LatencyMonitor); el check maker es de cada una
@@ -399,7 +436,6 @@ export async function createSource(opts: SourceOptions, shared: SharedDeps) {
     marketStore.addTrade(t);
     engine.ingest(t);
     for (const id of TIMED_IDS) engines3[id].addTrade(t);
-    fastRunner.addTrade(t);
     // [PREDICT desactivado] predict?.addTrade(t);
     if (ready) aggTrades.broadcast({ type: "trade", trade: t });
   };
@@ -420,13 +456,12 @@ export async function createSource(opts: SourceOptions, shared: SharedDeps) {
   chainlink.on("price", (p) => feed.onChainlink(p.time, p.value));
   // sin marca de tiempo de Polymarket, se usa la hora de llegada (reloj de Binance estimado)
   tracker.on("quote", (q) => feed.onQuote(q.token, q.bid, q.ask, q.time ?? clock.now()));
-  // libro completo y trades de Polymarket -> motores D y E (y su papel)
-  tracker.on("book", (b) => fastRunner.onBook(b.token, b.bids, b.asks, b.time ?? clock.now()));
+  // libro L2 de Polymarket -> check maker
+  tracker.on("book", (b) => books.get(b.token).snapshot(b.bids, b.asks, b.time ?? clock.now()));
   tracker.on("level", (l) => {
-    fastRunner.onLevel(l.token, l.side, l.price, l.size, l.time ?? clock.now(), clock.now());
+    books.get(l.token).set(l.side, l.price, l.size, l.time ?? clock.now());
     makerProbe.onLevel(l.token, l.side, l.price, l.size);
   });
-  tracker.on("trade", (t) => fastRunner.onTrade(t, clock.now()));
   for (const id of TIMED_IDS) {
     engines3[id].on("step", (st) => {
       tracker.addStep(id, st.slug, st.point, st.signals);
@@ -437,17 +472,6 @@ export async function createSource(opts: SourceOptions, shared: SharedDeps) {
       engines.broadcast({ type: "decision", engine: id, slug: st.slug, decision: st.decision });
     });
   }
-  fastRunner.on("step", (st) => {
-    tracker.addStep(st.engine, st.slug, st.point, []);
-    engines.broadcast({ type: "decision", engine: st.engine, slug: st.slug, decision: st.decision });
-  });
-  fastRunner.on("fills", (id, slug, signals) => tracker.addSignals(id, slug, signals));
-  fastRunner.on("order", (slug, order) => tracker.addOrder(slug, order));
-  // el motor D envia sus ordenes al decidir (no tras la ejecucion en papel): las compras reales las siguen si se elige D
-  fastRunner.on("intent", (signals) => {
-    liveTrader.onSignals("d", signals, tracker.current);
-    makerProbe.onSignals("d", signals, tracker.current);
-  });
   const pmStatus = () => polymarket.broadcast({ type: "status", upstream: pmUpstream() });
   tracker.on("status", pmStatus);
   chainlink.on("state", pmStatus);
@@ -456,11 +480,26 @@ export async function createSource(opts: SourceOptions, shared: SharedDeps) {
     makerProbe.onMarket(current);
     if (ready) polymarket.broadcast({ type: "markets", current, next });
   });
-  tracker.on("point", (engine, point) => ready && polymarket.broadcast({ type: "point", engine, point }));
+  tracker.on("point", (engine, point) => {
+    if (!ready) return;
+    polymarket.broadcast({ type: "point", engine, point });
+    // SS del market en curso: se recalcula con cada muestra del motor C y se envia solo si cambia
+    if (mk.strength && engine === "c" && tracker.current) {
+      const strength = liveStrength();
+      const key = `${tracker.current.slug}:${JSON.stringify(strength)}`;
+      if (key !== lastStrength) {
+        lastStrength = key;
+        polymarket.broadcast({ type: "strength", slug: tracker.current.slug, strength });
+      }
+    }
+  });
+  ref?.onPoint((point) => {
+    const cur = tracker.current;
+    if (ready && cur && point.time >= cur.start && point.time <= cur.end) polymarket.broadcast({ type: "ref", slug: cur.slug, label: ref.label, point });
+  });
   tracker.on("signal", (engine, signal) => ready && polymarket.broadcast({ type: "signal", engine, signal }));
-  tracker.on("order", (order) => ready && polymarket.broadcast({ type: "order", engine: "e", order }));
   tracker.on("record", (record) => {
-    if (ready) polymarket.broadcast({ type: "record", record });
+    if (ready) polymarket.broadcast({ type: "record", record: withStrength(record) });
     // solo se guardan markets resueltos y con los 5 minutos completos (se reintenta al llegar el resultado)
     if (record.market.status === "closed" && record.complete && marketStore.save(record, { version: ENGINE_VERSION, params: engineParams })) {
       console.log(`[${tag("polymarket")}] guardado ${record.market.slug} (${record.market.result}, pnl ${record.pnl.net})`);
@@ -531,9 +570,28 @@ export async function createSource(opts: SourceOptions, shared: SharedDeps) {
     });
   };
 
+  /** tokens Up/Down de 1 s de los markets de esta fuente, para SS de otro activo (docs/features/sol-strength.md) */
+  const toRef = (p: PmRecord["points"][number]): PmRefPoint => ({ time: p.time, up: tokenMid(p.upBid, p.upAsk), down: tokenMid(p.downBid, p.downAsk) });
+  const refFeed: RefFeed = {
+    label: opts.asset.toUpperCase(),
+    series(start, end) {
+      const fromPoints = (pts: PmRecord["points"]) => pts.filter((p) => p.time >= start && p.time <= end).map(toRef);
+      if (tracker.current?.start === start) return fromPoints(tracker.points);
+      const rec = tracker.history.find((r) => r.market.start === start) ?? marketStore.get(`${mk.pmSlugPrefix}-${Math.round(start / 1000)}`);
+      return rec ? fromPoints(rec.points) : [];
+    },
+    onPoint(fn) {
+      tracker.on("point", (engine, p) => {
+        if (engine === "a") fn(toRef(p));
+      });
+    },
+  };
+
   return {
     id: opts.id,
+    asset: opts.asset,
     marketStore,
+    refFeed,
     clock,
     tracker,
     // [PREDICT desactivado] /** motores de Predict de esta fuente (null si estan desactivados) */
@@ -548,7 +606,7 @@ export async function createSource(opts: SourceOptions, shared: SharedDeps) {
      */
     handleHttp(req: IncomingMessage, res: ServerResponse, path: string, url: URL): boolean {
       // [PREDICT desactivado] if (predict?.handleHttp(req, res, path, url)) return true;
-      // Interruptor de compras reales (motor A, C o D de esta fuente, market en curso). Protegido con TRADING_PASSWORD.
+      // Interruptor de compras reales (motor A o C de esta fuente, market en curso). Protegido con TRADING_PASSWORD.
       if (path === "/api/trading/arm") {
         passwordPost<TradingArmRequest>(req, res, 4096, "live", (body, reply) => {
           const err = liveTrader.setArmed(String(body.slug ?? ""), body.armed === true, { engine: body.engine, sizing: body.sizing });
@@ -585,7 +643,7 @@ export async function createSource(opts: SourceOptions, shared: SharedDeps) {
           return true;
         }
         res.writeHead(200, { "content-type": "application/json", "access-control-allow-origin": config.allowedOrigin || "*" });
-        res.end(JSON.stringify(rec));
+        res.end(JSON.stringify(withStrength(rec)));
         return true;
       }
       return false;
@@ -605,7 +663,6 @@ export async function createSource(opts: SourceOptions, shared: SharedDeps) {
           history: tracker.history.length,
           saved: marketStore.count(),
           engines: Object.fromEntries(engineInfo.map((e) => [e.id, { market: engineTrack(e.id).slug, decisions: engineTrack(e.id).decisions.length, mode: e.mode, delayMs: e.delayMs }])),
-          openOrders: fastRunner.orders().filter((o) => o.status === "open" || o.status === "pending").length,
         },
         // [PREDICT desactivado] predict: predict ? predict.health() : { enabled: false },
         predict: { enabled: false },
@@ -626,10 +683,10 @@ export async function createSource(opts: SourceOptions, shared: SharedDeps) {
       timers.push(
         setInterval(() => {
           if (depthClient.state !== "connected" || !depthClient.lastEventTime) return;
-          const col = book.toColumn(config.depthStep, config.depthRangePct, depthClient.lastEventTime);
+          const col = book.toColumn(mk.depthStep, config.depthRangePct, depthClient.lastEventTime);
           if (!col) return;
           depthHistory.push(col);
-          marketStore.addDepth(col, config.depthStep);
+          marketStore.addDepth(col, mk.depthStep);
           depth.broadcast({ type: "column", column: col });
         }, config.depthIntervalMs),
         setInterval(() => {
@@ -656,18 +713,17 @@ export async function createSource(opts: SourceOptions, shared: SharedDeps) {
               if (id === "a") {
                 const keep = new Set([tracker.current?.upToken ?? "", tracker.current?.downToken ?? "", tracker.next?.upToken ?? "", tracker.next?.downToken ?? ""]);
                 feed.prune(T - 60_000, keep);
-                fastRunner.books.prune(keep);
+                books.prune(keep);
               }
             },
             () => ready,
           ),
         );
-      stopEngines.push(scheduleFast(fastRunner, () => clock.now(), (t) => fastRunner.tick(t, marketAt(t)), () => ready));
       // [PREDICT desactivado] predict?.start();
 
       if (config.backfill) {
         const t0 = Date.now();
-        const n = await backfillTrades(opts.restUrl, config.symbol, Date.now() - config.retentionMs - 60_000, ingest, opts.backfillPageDelayMs, tag("backfill"));
+        const n = await backfillTrades(opts.restUrl, mk.symbol, Date.now() - config.retentionMs - 60_000, ingest, opts.backfillPageDelayMs, tag("backfill"));
         console.log(`[${tag("backfill")}] ${n} trades in ${Date.now() - t0}ms; bars=${engine.bars.length} signals=${engine.signals.length}`);
       }
       pending.sort((a, b) => a.id - b.id).forEach(ingest);

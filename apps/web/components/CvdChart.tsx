@@ -2,6 +2,7 @@
 
 import { useEffect, useRef } from "react";
 import type { CvdPoint, OrderflowSignal } from "@updown/protocol";
+import { chartMono } from "@/lib/chartFont";
 import { attachViewInteractions } from "@/lib/chartInteractions";
 import type { ChartView } from "@/lib/chartView";
 import { BUY_RGB, SELL_RGB, biasArrow, biasRgb, fmtClockHMS } from "@/lib/flow";
@@ -17,7 +18,8 @@ interface Props {
 }
 
 const PAD_BOTTOM = 18;
-const FONT = "11px ui-monospace, Consolas, monospace";
+/** fuente de los ejes; se fija al montar con la de la pagina (chartMono) */
+let FONT = "11px ui-monospace, Consolas, monospace";
 
 /** CVD (delta acumulado) con el MISMO eje de tiempo y zoom que la grafica de precio. Marca las divergencias. */
 export function CvdChart(props: Props) {
@@ -26,6 +28,8 @@ export function CvdChart(props: Props) {
   propsRef.current = props;
 
   useEffect(() => {
+    const mono = chartMono();
+    FONT = `11px ${mono}`;
     const canvas = canvasRef.current!;
     const ctx = canvas.getContext("2d")!;
     let raf = 0;
@@ -66,7 +70,7 @@ export function CvdChart(props: Props) {
       while (b < points.length && points[b]!.time <= end) b++;
       const vis = points.slice(Math.max(0, a - 1), Math.min(points.length, b + 1));
       if (vis.length < 2) {
-        ctx.fillStyle = "#5e6673";
+        ctx.fillStyle = "#6b6b6b";
         ctx.fillText("CVD: esperando datos…", 12, 18);
         return;
       }
@@ -86,7 +90,7 @@ export function CvdChart(props: Props) {
       // Grilla: limites de barra (vertical) y 3 niveles de CVD (horizontal)
       ctx.lineWidth = 1;
       ctx.strokeStyle = "rgba(255,255,255,0.06)";
-      ctx.fillStyle = "#848e9c";
+      ctx.fillStyle = "#8f8f8f";
       for (let t = Math.ceil(from / barMs) * barMs; t <= end; t += barMs) {
         const xx = Math.round(x(t)) + 0.5;
         ctx.beginPath();
@@ -171,7 +175,7 @@ export function CvdChart(props: Props) {
             ctx.fillStyle = `rgb(${rgb})`;
             ctx.fill();
           }
-          ctx.font = "bold 10px ui-monospace, Consolas, monospace";
+          ctx.font = `bold 10px ${mono}`;
           ctx.lineWidth = 3;
           ctx.strokeStyle = "rgba(0,0,0,0.75)";
           ctx.strokeText(`DIV${biasArrow(s.bias)}`, tx - 12, y(s.link.to.cvd) + (s.bias === "bullish" ? -8 : 15));
@@ -190,10 +194,10 @@ export function CvdChart(props: Props) {
         const up = last.cvd >= 0;
         ctx.fillStyle = `rgb(${up ? BUY_RGB : SELL_RGB})`;
         ctx.fillRect(pw, ly - 8, PAD_RIGHT, 16);
-        ctx.fillStyle = "#0b0e11";
+        ctx.fillStyle = "#0a0a0a";
         ctx.fillText(last.cvd.toFixed(2), pw + 6, ly + 4);
       }
-      ctx.fillStyle = "#848e9c";
+      ctx.fillStyle = "#8f8f8f";
       ctx.fillText("CVD", 8, 14);
     };
     raf = requestAnimationFrame(draw);
@@ -204,5 +208,5 @@ export function CvdChart(props: Props) {
     };
   }, []);
 
-  return <canvas ref={canvasRef} className="block h-[150px] w-full select-none border-t bg-[#0b0e11]" />;
+  return <canvas ref={canvasRef} className="block h-[130px] w-full select-none border-t border-white/10 bg-screen sm:h-[150px]" />;
 }

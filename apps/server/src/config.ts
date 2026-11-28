@@ -63,6 +63,38 @@ export const config = {
     backupPrefix: `${prefixBase.replace(/\/$/, "")}-futures/${DB_GENERATION}/`,
   },
 
+  /**
+   * ETH (ADR 0018): un clon completo de BTC (spot + futures si FUTURES_ENABLED) con sus markets ETH Up/Down 5m, su Chainlink ETH/USD
+   * y sus bases/backups aparte. Los parametros de motores y estrategia son los de BTC (todo es relativo al precio); solo cambian
+   * los tamanos de precio y volumen del heatmap y del footprint.
+   */
+  // PRUEBA (27 nov): el hueco de ETH consume SOLANA (SOLUSDT, markets sol-updown-5m, Chainlink SOL/USD). En la web sigue
+  // llamandose "ETH". Para volver a ETH: restaurar los valores por defecto de este bloque (ethusdt, ETH, eth-updown-5m, ethusd,
+  // eth/usd, 0.05, 0.05, 1.5, polymarket-eth*.db, updown-eth*).
+  eth: {
+    enabled: bool(process.env.ETH_ENABLED, true),
+    symbol: (process.env.ETH_SYMBOL ?? "solusdt").toLowerCase(),
+    pmSymbol: process.env.ETH_PM_SYMBOL ?? "SOL",
+    pmSlugPrefix: process.env.ETH_PM_SLUG_PREFIX ?? "sol-updown-5m",
+    /** Chainlink ETH/USD: TWAP de PolyBolt y spot del RTDS (respaldo) */
+    chainlinkTwapSymbol: process.env.ETH_CHAINLINK_TWAP_SYMBOL ?? "solusd",
+    chainlinkSymbol: process.env.ETH_CHAINLINK_SYMBOL ?? "sol/usd",
+    /** SOL ~72 USDT: 0.01 es el tick minimo de Binance (ETH: 0.05) */
+    depthStep: num(process.env.ETH_DEPTH_STEP, 0.01),
+    footprintTick: num(process.env.ETH_FOOTPRINT_TICK, 0.01),
+    /** ~el mismo valor en USD que 0.05 BTC (ETH: 1.5) */
+    imbalanceMinVol: num(process.env.ETH_IMBALANCE_MIN_VOL, 40),
+    /** SS (movimientos con fuerza del motor C, con BTC de referencia): docs/features/sol-strength.md */
+    strength: bool(process.env.ETH_STRENGTH, true),
+    dbPath: withGeneration(resolveDbPath(process.env.ETH_DB_PATH ?? join(dirname(dbRequested), "polymarket-sol.db"), process.env.RAILWAY_VOLUME_MOUNT_PATH)),
+    futuresDbPath: withGeneration(
+      resolveDbPath(process.env.ETH_FUTURES_DB_PATH ?? join(dirname(dbRequested), "polymarket-sol-futures.db"), process.env.RAILWAY_VOLUME_MOUNT_PATH),
+    ),
+    /** carpetas propias en el bucket (p. ej. updown-eth/v2/ y updown-eth-futures/v2/) */
+    backupPrefix: `${prefixBase.replace(/\/$/, "")}-sol/${DB_GENERATION}/`,
+    futuresBackupPrefix: `${prefixBase.replace(/\/$/, "")}-sol-futures/${DB_GENERATION}/`,
+  },
+
   retentionMs,
   /** Tope de seguridad de trades en memoria (además del límite por tiempo) */
   tradesMax: num(process.env.TRADES_MAX, 100_000),
@@ -116,7 +148,7 @@ export const config = {
   pmFunderAddress: (process.env.PM_FUNDER_ADDRESS ?? "").trim(),
   // ── Latencia hacia el CLOB (/ws/latency, docs/features/latency.md): solo lectura, nunca opera ──
   pmLatencyIntervalMs: num(process.env.PM_LATENCY_INTERVAL_MS, 15_000),
-  // ── Compras reales del motor A, C o D (/ws/trading, docs/features/live-trading.md). Sin clave o sin contrasena: desactivado ──
+  // ── Compras reales del motor A o C (/ws/trading, docs/features/live-trading.md). Sin clave o sin contrasena: desactivado ──
   live: {
     /** clave privada de la EOA firmante (la de PM_SIGNER_ADDRESS). SOLO en .env.local / variables de Railway */
     privateKey: process.env.PM_WALLET_PRIVATE_KEY ?? "",
@@ -226,39 +258,6 @@ export const config = {
     a: num(process.env.PM_ENGINE_A_DELAY_MS, 0),
     c: num(process.env.PM_ENGINE_C_DELAY_MS, 150),
   },
-  /** Motores D (predictivo, taker) y E (libro, maker): docs/features/predictive-engines.md */
-  pmFast: {
-    /** cada cuanto deciden (ms) */
-    tickMs: num(process.env.PM_FAST_TICK_MS, 100),
-    /** peso del modelo al mezclar con el mercado, y en los ultimos 30 s */
-    modelWeight: num(process.env.PM_FAST_MODEL_WEIGHT, 0.6),
-    modelWeightEnd: num(process.env.PM_FAST_MODEL_WEIGHT_END, 0.3),
-    /** multiplicador de la deriva prevista por el flujo de Binance (0 = ignorarla) */
-    driftGain: num(process.env.PM_DRIFT_GAIN, 3),
-    /** coeficientes de la deriva recalculados con `npm run calibrate` (si el archivo existe, se usan) */
-    calibrationPath: process.env.PM_CALIBRATION_PATH ?? "data/calibration.json",
-    d: {
-      minEdge: num(process.env.PM_D_MIN_EDGE, 0.1),
-      limitMargin: num(process.env.PM_D_LIMIT_MARGIN, 0.03),
-      exitMargin: num(process.env.PM_D_EXIT_MARGIN, 0.03),
-      noEntryS: num(process.env.PM_D_NO_ENTRY_S, 20),
-    },
-    e: {
-      edge: num(process.env.PM_E_EDGE, 0.05),
-      exitEdge: num(process.env.PM_E_EXIT_EDGE, 0.04),
-      needDrift: num(process.env.PM_E_NEED_DRIFT, 0.05),
-      dropCancel: num(process.env.PM_E_DROP_CANCEL, 0.01),
-      stop: num(process.env.PM_E_STOP, 0.15),
-      minRestMs: num(process.env.PM_E_MIN_REST_MS, 500),
-      noEntryS: num(process.env.PM_E_NO_ENTRY_S, 20),
-    },
-    /** papel realista: retraso de una orden taker hasta ejecutarse, de una orden maker hasta entrar al libro y de una cancelacion */
-    paper: {
-      takerLatencyMs: num(process.env.PM_PAPER_TAKER_LATENCY_MS, 1500),
-      postLatencyMs: num(process.env.PM_PAPER_POST_LATENCY_MS, 150),
-      cancelLatencyMs: num(process.env.PM_PAPER_CANCEL_LATENCY_MS, 100),
-    },
-  },
   // ── Predict.fun (rondas BTC Up/Down 5m, docs/features/predict-markets.md) ──
   predict: {
     enabled: bool(process.env.PREDICT_ENABLED, true),
@@ -273,7 +272,7 @@ export const config = {
     feeRate: num(process.env.PREDICT_FEE_RATE, 0.02),
     /** ventana (s) de la media de Binance para el basis contra el Chainlink puntual */
     basisSeconds: num(process.env.PREDICT_BASIS_SECONDS, 5),
-    /** motores sobre Predict (A, C, D, E en papel, una pila por fuente) */
+    /** motores sobre Predict (A y C en papel, una pila por fuente) */
     engines: bool(process.env.PREDICT_ENGINES, true),
     /** bases de los markets de Predict (solo markets; los aggTrades estan en la base de cada fuente), junto a la de spot */
     dbPath: withGeneration(resolveDbPath(process.env.PREDICT_DB_PATH ?? join(dirname(dbRequested), "predict.db"), process.env.RAILWAY_VOLUME_MOUNT_PATH)),

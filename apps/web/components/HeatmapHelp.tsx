@@ -92,7 +92,7 @@ export function HeatmapHelp() {
 
           <p className="rounded-md bg-muted/50 p-2 text-xs text-muted-foreground">
             Alcance: solo se muestra el precio ±0,1 % y los últimos 15 minutos. La liquidez está en cantidad de activo
-            (BTC); el color se escala con lo que hay visible en pantalla, así que compara zonas dentro de la misma vista,
+            (BTC o ETH); el color se escala con lo que hay visible en pantalla, así que compara zonas dentro de la misma vista,
             no entre ventanas de tiempo distintas.
           </p>
         </div>

@@ -7,7 +7,8 @@ import { CHANNELS, type LatencyProbeId } from "@updown/protocol";
 export type Venue = "polymarket" | "predict";
 
 export interface VenueInfo {
-  title: string;
+  /** titulo del panel para un activo (`BTC`, `ETH`) */
+  title: (ticker: string) => string;
   /** etiqueta del estado del enlace */
   badge: string;
   channel: string;
@@ -17,7 +18,7 @@ export interface VenueInfo {
   /** compras reales disponibles */
   trading: boolean;
   /** etiqueta del precio Chainlink: TWAP en Polymarket, precio puntual en Predict */
-  chainlinkLabel: string;
+  chainlinkLabel: (ticker: string) => string;
   /** título de la franja de Chainlink de la gráfica */
   chainTitle: string;
   /** compras reales: canal, interruptor y textos */
@@ -40,13 +41,13 @@ export interface VenueInfo {
 
 export const VENUES: Record<Venue, VenueInfo> = {
   polymarket: {
-    title: "Polymarket · BTC Up or Down 5m",
+    title: (t) => `Polymarket · ${t} Up or Down 5m`,
     badge: "Polymarket",
     channel: CHANNELS.polymarket,
     enginesChannel: CHANNELS.engines,
     api: "/api/markets",
     trading: true,
-    chainlinkLabel: "Chainlink BTC/USD",
+    chainlinkLabel: (t) => `Chainlink ${t}/USD`,
     chainTitle: "Precio Chainlink (USD, fuente de Polymarket) con señales",
     tradingChannel: CHANNELS.trading,
     armApi: "/api/trading/arm",
@@ -59,19 +60,19 @@ export const VENUES: Record<Venue, VenueInfo> = {
     noAuthText: "Falta PM_SIGNER_ADDRESS en el servidor: el GET autenticado y POST /order responden 401 antes de validar la orden. La latencia sigue siendo la del gateway; con la dirección, POST /order llega hasta la validación (400) y da la medida exacta.",
   },
   predict: {
-    title: "Predict.fun · BTC Up/Down 5m",
+    title: (t) => `Predict.fun · ${t} Up/Down 5m`,
     badge: "Predict",
     channel: CHANNELS.predict,
     enginesChannel: CHANNELS.predictEngines,
     api: "/api/predict/markets",
     trading: true,
-    chainlinkLabel: "Chainlink BTC/USD (precio)",
+    chainlinkLabel: (t) => `Chainlink ${t}/USD (precio)`,
     chainTitle: "Precio Chainlink (USD, precio puntual con que resuelve Predict) con señales",
     tradingChannel: CHANNELS.predictTrading,
     armApi: "/api/predict/trading/arm",
     currency: "USDT",
     minText: "1 USDT, el mínimo de Predict",
-    orderText: (sl) => `orden de mercado con deslizamiento máx. ${(sl * 100).toFixed(1)} % (el motor D usa su límite)`,
+    orderText: (sl) => `orden de mercado con deslizamiento máx. ${(sl * 100).toFixed(1)} %`,
     latencyChannel: CHANNELS.predictLatency,
     latencyTitle: "Latencia a Predict",
     latencyDesc: "Cuánto tardaría aproximadamente una compra/venta desde el servidor hasta la API de órdenes de Predict. Se envía una orden firmada con ceros, que expira antes del mínimo y es post-only a 0,01: Predict la rechaza siempre, nunca compra. No incluye el matching ni la liquidación on-chain.",

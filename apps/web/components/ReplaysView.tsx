@@ -136,7 +136,7 @@ function CumulativeChart({ markets, delayIdx, delayS }: { markets: PmReplayMarke
         ))}
         <line x1={pad.l} x2={width - pad.r} y1={y(0)} y2={y(0)} className="stroke-muted-foreground/60" strokeWidth={1} strokeDasharray="3 3" />
         <path d={path("base")} fill="none" className="stroke-muted-foreground" strokeWidth={2} strokeLinejoin="round" />
-        <path d={path("delayed")} fill="none" className="stroke-amber-400" strokeWidth={2} strokeLinejoin="round" />
+        <path d={path("delayed")} fill="none" className="stroke-gold" strokeWidth={2} strokeLinejoin="round" />
         <text x={x(series.length - 1) + 6} y={y(last.base) + 4} className="fill-muted-foreground text-[11px]">
           0 s
         </text>
@@ -147,7 +147,7 @@ function CumulativeChart({ markets, delayIdx, delayS }: { markets: PmReplayMarke
           <g>
             <line x1={x(hover)} x2={x(hover)} y1={pad.t} y2={H - pad.b} className="stroke-foreground/40" strokeWidth={1} />
             <circle cx={x(hover)} cy={y(h.base)} r={4} className="fill-muted-foreground stroke-card" strokeWidth={2} />
-            <circle cx={x(hover)} cy={y(h.delayed)} r={4} className="fill-amber-400 stroke-card" strokeWidth={2} />
+            <circle cx={x(hover)} cy={y(h.delayed)} r={4} className="fill-gold stroke-card" strokeWidth={2} />
           </g>
         )}
         <text x={pad.l} y={H - 6} className="fill-muted-foreground text-[10px]">
@@ -170,7 +170,7 @@ function CumulativeChart({ markets, delayIdx, delayS }: { markets: PmReplayMarke
             <span>{usd(h.base)}</span>
           </div>
           <div className="flex justify-between gap-4 font-mono">
-            <span className="text-amber-400">+{delayS} s</span>
+            <span className="text-gold">+{delayS} s</span>
             <span>{usd(h.delayed)}</span>
           </div>
           <div className="text-muted-foreground">
@@ -316,7 +316,7 @@ export function ReplaysView() {
         <CardHeader>
           <CardTitle>Neto acumulado (USDC)</CardTitle>
           <CardDescription>
-            Markets con operaciones en orden cronológico. <span className="text-muted-foreground">━ 0 s (referencia)</span> · <span className="text-amber-400">━ +{delay} s</span>
+            Markets con operaciones en orden cronológico. <span className="text-muted-foreground">━ 0 s (referencia)</span> · <span className="text-gold">━ +{delay} s</span>
           </CardDescription>
         </CardHeader>
         <CardContent>

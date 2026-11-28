@@ -32,7 +32,7 @@ function Verdict({ label, edge, block, threshold }: { label: string; edge: numbe
 }
 
 /** Estado en vivo de un motor: ultima decision y sus razones. */
-function EngineCard({ id, hint, d, trades, th, maker }: { id: PmEngineId; hint: string; d: PmDecision | undefined; trades: number; th: PmEngineThresholds; maker: boolean }) {
+function EngineCard({ id, hint, d, trades, th }: { id: PmEngineId; hint: string; d: PmDecision | undefined; trades: number; th: PmEngineThresholds }) {
   return (
     <div className="flex flex-col gap-2 rounded-md border p-3 text-xs">
       <div className="flex flex-col">
@@ -45,7 +45,7 @@ function EngineCard({ id, hint, d, trades, th, maker }: { id: PmEngineId; hint: 
         <>
           <div>
             <div className="text-[11px] text-muted-foreground">P(Up) con que decide</div>
-            <div className="font-mono text-lg font-semibold text-violet-400">{pct(d.pUp)}</div>
+            <div className="font-mono text-lg font-semibold text-chain">{pct(d.pUp)}</div>
             <div className="font-mono text-[11px] text-muted-foreground">
               modelo {pct(d.pModel)} · mercado {pct(d.pMarket)} · faltan {d.tau.toFixed(0)}s
             </div>
@@ -59,13 +59,13 @@ function EngineCard({ id, hint, d, trades, th, maker }: { id: PmEngineId; hint: 
             </span>
           </div>
           <div className="flex flex-col gap-0.5 border-t pt-2">
-            <Verdict label={maker ? "Bid Up" : "Comprar Up"} edge={d.up.buyEdge} block={d.up.buy} threshold={th.minEdge} />
-            <Verdict label={maker ? "Bid Down" : "Comprar Down"} edge={d.down.buyEdge} block={d.down.buy} threshold={th.minEdge} />
-            {d.up.sell !== "flat" && <Verdict label={maker ? "Ask Up" : "Vender Up"} edge={d.up.sellEdge} block={d.up.sell} threshold={th.exitMargin} />}
-            {d.down.sell !== "flat" && <Verdict label={maker ? "Ask Down" : "Vender Down"} edge={d.down.sellEdge} block={d.down.sell} threshold={th.exitMargin} />}
+            <Verdict label="Comprar Up" edge={d.up.buyEdge} block={d.up.buy} threshold={th.minEdge} />
+            <Verdict label="Comprar Down" edge={d.down.buyEdge} block={d.down.buy} threshold={th.minEdge} />
+            {d.up.sell !== "flat" && <Verdict label="Vender Up" edge={d.up.sellEdge} block={d.up.sell} threshold={th.exitMargin} />}
+            {d.down.sell !== "flat" && <Verdict label="Vender Down" edge={d.down.sellEdge} block={d.down.sell} threshold={th.exitMargin} />}
           </div>
           <div className="text-[11px] text-muted-foreground">
-            {trades} {maker ? "salidas de emergencia" : "órdenes"} decididas en este market
+            {trades} órdenes decididas en este market
             {d.signals.length > 0 && <> · ahora: <b className="text-foreground">{d.signals.map(signalLabel).join(", ")}</b></>}
           </div>
         </>
@@ -92,7 +92,7 @@ const Timeline = memo(function Timeline({ decisions, start }: { decisions: Recor
   const [onlyDiff, setOnlyDiff] = useState(false);
   const [all, setAll] = useState(false);
   const rows = useMemo(() => {
-    // todos los motores dejan un registro por segundo T de Binance (A y C con su retraso; D y E, el ultimo paso de ese segundo)
+    // todos los motores dejan un registro por segundo T de Binance (con su retraso)
     const map = new Map<number, Row>();
     for (const id of ENGINE_IDS)
       for (const d of decisions[id]) {
@@ -103,7 +103,7 @@ const Timeline = memo(function Timeline({ decisions, start }: { decisions: Recor
       }
     const out = [...map.values()].sort((x, y) => y.sec - x.sec);
     for (const r of out) {
-      // solo se comparan los motores con las mismas reglas (A y C); D y E deciden con otras
+      // se comparan los motores con las mismas reglas (A y C)
       const present = SAME_RULES.map((id) => r.d[id]).filter((d): d is PmDecision => !!d);
       if (present.length < 2) continue;
       r.diffAction = new Set(present.map(actionKey)).size > 1;
@@ -140,7 +140,7 @@ const Timeline = memo(function Timeline({ decisions, start }: { decisions: Recor
           </TableHeader>
           <TableBody>
             {shown.map((r) => (
-              <TableRow key={r.sec} className={r.diffAction ? "bg-yellow-500/15" : r.diffState ? "bg-yellow-500/5" : ""}>
+              <TableRow key={r.sec} className={r.diffAction ? "bg-warn/15" : r.diffState ? "bg-warn/5" : ""}>
                 <TableCell className="font-mono">+{Math.round((r.sec * 1000 - start) / 1000)}s</TableCell>
                 {ENGINE_IDS.map((id) => (
                   <TableCell key={id} className="text-[11px] whitespace-normal">
@@ -163,7 +163,7 @@ const Timeline = memo(function Timeline({ decisions, start }: { decisions: Recor
 });
 
 /**
- * Drawer de comparacion de motores A, C, D y E: la ultima decision de cada uno con sus razones, la linea de tiempo
+ * Drawer de comparacion de motores A y C: la ultima decision de cada uno con sus razones, la linea de tiempo
  * segundo a segundo del market en curso, y el resultado de papel de todos en los markets guardados recientes.
  */
 export function EnginesDrawer({
@@ -196,12 +196,10 @@ export function EnginesDrawer({
     <Sheet open={open} onOpenChange={onOpenChange}>
       <SheetContent className="w-full overflow-y-auto sm:max-w-5xl">
         <SheetHeader>
-          <SheetTitle>Motores A, C, D y E</SheetTitle>
+          <SheetTitle>Motores A y C</SheetTitle>
           <SheetDescription>
             <b>A</b> y <b>C</b>: mismas reglas, una decisión por segundo de Binance (A justo al empezar el segundo con lo último recibido; C espera{" "}
-            {delay("c")?.delayMs ?? 150} ms y usa solo datos con marca de tiempo de ese segundo). <b>D</b> (predictivo): decide cada {delay("d")?.delayMs ?? 100} ms
-            con la deriva que anticipa el flujo de Binance, exige más EV y pone un precio límite; su papel se ejecuta con la latencia real de Polymarket.{" "}
-            <b>E</b> (libro): deja órdenes límite en reposo sin comisión y las recoloca o cancela en cuanto la idea muere. Todos se guardan en la base.
+            {delay("c")?.delayMs ?? 150} ms y usa solo datos con marca de tiempo de ese segundo). Los dos se guardan en la base.
           </SheetDescription>
         </SheetHeader>
         <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
@@ -209,23 +207,19 @@ export function EnginesDrawer({
           {th && (
             <span>
               Umbrales de A y C: comprar si EV ≥ {edgeCents(th.minEdge)} · vender si supera a mantener en {edgeCents(th.exitMargin)} · spread máx. {cents(th.maxSpread)} ·
-              sin entradas los primeros {th.warmupS}s ni los últimos {th.noEntryS}s. D y E muestran los suyos en cada tarjeta.
+              sin entradas los primeros {th.warmupS}s ni los últimos {th.noEntryS}s.
             </span>
           )}
         </div>
 
         {th && (
-          <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
+          <div className="grid gap-2 md:grid-cols-2">
             {ENGINE_IDS.map((id) => {
               const info = delay(id);
               const ds = decisions[id];
               const own = info?.thresholds ?? th;
-              const hint = !info
-                ? ENGINE_DESC[id]
-                : info.mode === "fast"
-                  ? `${ENGINE_DESC[id]} · ${info.kind === "maker" ? `bid a ≥ ${edgeCents(own.minEdge)} bajo su valor, ask a ${edgeCents(own.exitMargin)} sobre él` : `EV ≥ ${edgeCents(own.minEdge)}, salida ${edgeCents(own.exitMargin)}`}`
-                  : `${info.mode === "live" ? "lo último recibido" : "datos a fecha"} · segundo + ${info.delayMs} ms`;
-              return <EngineCard key={id} id={id} hint={hint} d={ds[ds.length - 1]} trades={ds.reduce((n, d) => n + d.signals.length, 0)} th={own} maker={info?.kind === "maker"} />;
+              const hint = !info ? ENGINE_DESC[id] : `${info.mode === "live" ? "lo último recibido" : "datos a fecha"} · segundo + ${info.delayMs} ms`;
+              return <EngineCard key={id} id={id} hint={hint} d={ds[ds.length - 1]} trades={ds.reduce((n, d) => n + d.signals.length, 0)} th={own} />;
             })}
           </div>
         )}

@@ -84,6 +84,14 @@ export class HttpPolymarketApi implements PolymarketApi {
     return (await this.cryptoPrice(start, end)).open;
   }
 
+  /** Resultado de un market ya cerrado segun Gamma (`closed` + `outcomePrices` 1/0); null si aun no esta resuelto. */
+  private async gammaOutcome(slug: string): Promise<string | null> {
+    const ev = (await getJson(`${this.gammaUrl}/events/slug/${slug}`)) as {
+      markets?: { closed?: boolean; outcomes?: string; outcomePrices?: string }[];
+    } | null;
+    return gammaOutcome(ev?.markets?.[0]);
+  }
+
   /**
    * `past-results` con `includeOutcomesBySlug`: el "market actual" de la consulta es el siguiente al
    * que preguntamos (empieza en `end`) y `pastEventSlugs` lleva el que queremos resolver. El resultado
@@ -104,12 +112,28 @@ export class HttpPolymarketApi implements PolymarketApi {
     const r = (await getJson(`${this.siteUrl}/api/past-results?${q}`)) as {
       data?: { outcomesBySlug?: Record<string, string> };
     } | null;
-    const o = r?.data?.outcomesBySlug?.[slug]?.toLowerCase();
+    // `past-results` solo cubre BTC en 5m ("5-minute markets currently supported only for BTC"); para otros
+    // activos (SOL, ETH) el resultado sale de Gamma: market cerrado y precios finales 1/0.
+    const o = r?.data?.outcomesBySlug?.[slug]?.toLowerCase() ?? (await this.gammaOutcome(slug));
     if (o !== "up" && o !== "down") return null;
 
     // Sin el cierre TWAP todavia no damos el market por resuelto: se reintenta.
     const { open, close } = await this.cryptoPrice(start, end);
     if (open === null || close === null) return null;
     return { result: o, openPrice: open, closePrice: close, changePct: ((close - open) / open) * 100 };
+  }
+}
+
+/** Ganador de un market de Gamma: cerrado y con un precio final de 1 (el otro 0). Funcion pura. */
+export function gammaOutcome(m: { closed?: boolean; outcomes?: string; outcomePrices?: string } | undefined): "up" | "down" | null {
+  if (!m?.closed || !m.outcomes || !m.outcomePrices) return null;
+  try {
+    const outcomes = JSON.parse(m.outcomes) as string[];
+    const prices = (JSON.parse(m.outcomePrices) as string[]).map(Number);
+    if (prices.length !== outcomes.length || prices.filter((p) => p === 1).length !== 1 || prices.some((p) => p !== 0 && p !== 1)) return null;
+    const o = outcomes[prices.indexOf(1)]?.toLowerCase();
+    return o === "up" || o === "down" ? o : null;
+  } catch {
+    return null;
   }
 }

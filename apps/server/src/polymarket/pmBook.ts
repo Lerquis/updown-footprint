@@ -1,7 +1,7 @@
 /**
  * Libro completo (L2) de los tokens de Polymarket, alimentado por el canal de market (`book` + `price_change`), y los
- * trades del token (`last_trade_price`). Lo usan los motores D y E: D para estimar a que precio se ejecutaria de verdad un
- * importe (recorriendo niveles), E para simular su lugar en la cola de una orden en reposo. Ver docs/features/predictive-engines.md.
+ * trades del token (`last_trade_price`). Lo usan el check maker (mejor bid/ask y tamano de cada nivel) y las compras reales
+ * de Predict (libro para firmar la orden MARKET).
  */
 
 /** Nivel del libro: precio (0-1) y tokens */

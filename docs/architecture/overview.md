@@ -12,6 +12,8 @@ Binance WS/REST ─────────────────────�
 
 **Dos fuentes** ([ADR 0016](../decisions/0016-fuente-futures-en-paralelo.md)): todo lo de arriba, desde Binance hasta los motores, la base y las compras reales, se crea una vez para **spot** (`/ws/*`) y otra para **futures**, el perpetuo USDⓈ-M (`/ws/futures/*`). Chainlink y la latencia al CLOB se comparten. [futures-source](../features/futures-source.md).
 
+**Dos activos** ([ADR 0018](../decisions/0018-eth-como-segundo-activo.md)): lo anterior existe para **BTC** y para **ETH** (`/ws/eth/*`, `/ws/eth/futures/*`), cada uno con sus markets Up/Down 5m de Polymarket, su Chainlink, sus bases y sus backups: hasta cuatro fuentes. Solo la latencia al CLOB es común. La web los muestra en la misma página, con bloques plegables y tema claro/oscuro ([ADR 0019](../decisions/0019-rediseno-claro-oscuro-acordeones.md)). [eth-asset](../features/eth-asset.md).
+
 ## Principio
 El servidor es el **único consumidor** de datos de mercado y el **único dueño de la lógica de análisis**: mantiene estado en memoria, de modo que un usuario que entra recibe un **snapshot inmediato** y luego deltas en vivo; todos ven los mismos datos y las mismas señales. Ver [ADR 0001](../decisions/0001-servidor-como-consumidor-unico.md) y [ADR 0006](../decisions/0006-orderflow-y-monitor-en-servidor.md).
 
@@ -27,15 +29,14 @@ El servidor es el **único consumidor** de datos de mercado y el **único dueño
 | `detectors.ts` | Funciones puras: desequilibrios, apilados, absorción, agotamiento, divergencia de CVD |
 | `SignalEngine` (`server/src/polymarket/strategy.ts`) + `model.ts` | Probabilidad de Up (precio, price to beat, tiempo, volatilidad, flujo) → señales de compra/venta con EV neto de comisión; ver [signal-engine](../features/signal-engine.md) |
 | `TimedEngine` ×2 + `PmFeed` (`polymarket/timedEngine.ts`) | Motores A (T+0, en vivo) y C (T+150 ms, "a fecha"): misma regla, cronometrados con el reloj de Binance; sus muestras y operaciones van al tracker (se guardan) y su registro a `/ws/engines` ([engines](../features/engines.md)) |
-| `FastRunner` (`polymarket/fastRunner.ts`) | Motores D (predictivo, taker con límite) y E (libro, maker) cada 100 ms: aggTrades y libro de Binance (`MicroFlow`, deriva), libro L2 y trades de Polymarket (`PmBooks`), Chainlink. Papel realista (`PaperTaker`, `PaperMaker`); muestras, ejecuciones y órdenes al tracker, órdenes de D al `LiveTrader` si se eligió D ([predictive-engines](../features/predictive-engines.md)) |
 | `createPredictVenue` (`server/src/predict/venue.ts`) | **Desactivado (comentado).** Predict.fun, una pila por fuente: la misma de Polymarket (tracker, motores A/C/D/E en papel, base, canales) con adaptadores de Predict (`PredictMarketApi` por REST con API key, `PredictBook` y precio Chainlink puntual por su WS público) y motores sin TWAP → `/ws/predict`, `/ws/predict-engines`, `/api/predict/markets` ([predict-markets](../features/predict-markets.md)) |
 | `LatencyMonitor` (`polymarket/latency.ts`) + `ClobH2` (`clobConnection.ts`) | Conexión HTTP/2 caliente al CLOB ([ADR 0012](../decisions/0012-conexion-http2-caliente-al-clob.md)). Cada 15 s mide (nunca opera) la latencia al CLOB de Polymarket: conexión nueva, ping, libro, GET autenticado L2 y `POST /order` con una orden completa firmada con ceros (rechazada al verificar la firma) → `/ws/latency` ([latency](../features/latency.md)) |
-| `LiveTrader` (`polymarket/liveTrader.ts`) | Compras/ventas reales del motor elegido (A, C o D) con el interruptor activado: firma local + `POST /order` por HTTP/2 → `/ws/trading` ([live-trading](../features/live-trading.md)) |
+| `LiveTrader` (`polymarket/liveTrader.ts`) | Compras/ventas reales del motor elegido (A o C) con el interruptor activado: firma local + `POST /order` por HTTP/2 → `/ws/trading` ([live-trading](../features/live-trading.md)) |
 | `MarketStore` (`polymarket/store.ts`) + `rebuild.ts` | SQLite (`node:sqlite`): markets resueltos y completos, más todos los aggTrades y las columnas del heatmap en continuo; `rebuildOrderflow` rehace footprint/CVD/señales |
 | `DbBackup` (`backup/`) | Copia periódica de la base a S3/R2 y restauración al arrancar sin base ([deployment.md](../guides/deployment.md)) |
 | `AnalysisMonitor` + `scenarios.ts` | Tendencias de precio/CVD + señales recientes → escenarios activos, score y sesgo |
 | `Channel<M>` (`server/src/ws/channel.ts`) | Canal WS genérico: snapshot al conectar + broadcast. Una instancia por tipo de dato |
-| `source.ts` | `createSource()`: una fuente completa (spot o futures). Clientes de Binance, tubería de trades (`ingest`), orderflow, motores, tracker, base, backups, compras reales y sus canales y su API |
+| `source.ts` | `createSource()`: una fuente completa (activo BTC/ETH × spot/futures; `AssetMarket` = lo que cambia entre activos). Clientes de Binance, tubería de trades (`ingest`), orderflow, motores, tracker, base, backups, compras reales y sus canales y su API |
 | `index.ts` | Composición: Chainlink y `LatencyMonitor` compartidos, una fuente por mercado, HTTP (`/health`, `/api/compare`, `/api/replays` y la API de cada fuente), enrutado de upgrade por fuente, check de Origin |
 | `compare.ts` (`polymarket/`) | Comparativa spot vs futures por motor: adelanto y precio de la primera entrada, P&L |
 | `useWsChannel` (`web/lib`) | Conexión WS genérica con reconexión; la usan todos los hooks. Añade la fuente elegida (`lib/source.tsx`, `SourceProvider`) a la ruta |
@@ -51,5 +52,5 @@ El servidor es el **único consumidor** de datos de mercado y el **único dueño
 - Estado solo en memoria; sin persistencia. Memoria de **15 min** (`RETENTION_MS`) para trades, heatmap y CVD; 60 barras (1 h) para footprint y señales. Ver [ADR 0005](../decisions/0005-retencion-15min-y-backfill.md).
 - Al reiniciar, trades/CVD/footprint se reconstruyen por REST (relleno); **el heatmap no** (Binance no da libro histórico): se rellena en vivo.
 - Una sola instancia del servidor (el broadcast es en-proceso).
-- Un símbolo por servidor (`SYMBOL`), con dos fuentes: spot y futures.
+- Dos activos por servidor (BTC con `SYMBOL`, ETH con `ETH_SYMBOL`), cada uno con dos fuentes: spot y futures.
 - El heatmap cubre solo mid ± `DEPTH_RANGE_PCT` y la profundidad que Binance entrega (snapshot de 5000 niveles por lado en spot, 1000 en futures).

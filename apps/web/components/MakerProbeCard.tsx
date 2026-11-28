@@ -1,5 +1,6 @@
 "use client";
 
+import { useAsset } from "@/lib/source";
 import { useState } from "react";
 import type { LiveEngine, MakerProbeSample } from "@updown/protocol";
 import { Badge } from "@/components/ui/badge";
@@ -26,7 +27,7 @@ const METRICS: { key: Key; label: string; help: string }[] = [
 
 const STATUS: Record<MakerProbeSample["status"], { label: string; cls: string }> = {
   filled: { label: "llena", cls: "text-buy" },
-  partial: { label: "parcial", cls: "text-yellow-500" },
+  partial: { label: "parcial", cls: "text-warn" },
   unfilled: { label: "sin ejecutar", cls: "text-muted-foreground" },
   rejected: { label: "rechazada", cls: "text-sell" },
   skipped: { label: "omitida", cls: "text-muted-foreground" },
@@ -34,7 +35,7 @@ const STATUS: Record<MakerProbeSample["status"], { label: string; cls: string }>
 };
 
 const fmt = (v: number | null | undefined) => (v === null || v === undefined ? "–" : `${Math.round(v)} ms`);
-const tone = (ms: number | null) => (ms === null ? "text-muted-foreground" : ms < 150 ? "text-buy" : ms < 400 ? "text-yellow-500" : "text-sell");
+const tone = (ms: number | null) => (ms === null ? "text-muted-foreground" : ms < 150 ? "text-buy" : ms < 400 ? "text-warn" : "text-sell");
 const cents = (v: number) => `${(v * 100).toFixed(0)}¢`;
 
 function median(xs: number[]): number | null {
@@ -47,7 +48,7 @@ function median(xs: number[]): number | null {
 const col = (h: MakerProbeSample[], k: Key) => h.map((s) => s[k]).filter((v): v is number => v !== null);
 
 /**
- * Check maker: órdenes maker reales (límite post-only a mejor bid + 1 tick, como el motor E) siguiendo al motor A, C o D;
+ * Check maker: órdenes maker reales (límite post-only a mejor bid + 1 tick) siguiendo al motor A o C;
  * se cancelan a los 2 s si no se llenan. Mide cada paso y cuántas se ejecutan. Interruptor con la contraseña de trading.
  */
 export function MakerProbeCard({ lat }: { lat: LatencyView }) {
@@ -56,6 +57,7 @@ export function MakerProbeCard({ lat }: { lat: LatencyView }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [engine, setEngine] = useState<LiveEngine | null>(null);
+  const asset = useAsset();
   const st = lat.maker.state;
   const h = lat.maker.history;
   const sent = h.filter((s) => s.time !== null);
@@ -77,11 +79,11 @@ export function MakerProbeCard({ lat }: { lat: LatencyView }) {
   if (!st) return null;
   const filled = sent.filter((s) => s.status === "filled" || s.status === "partial").length;
   return (
-    <div className="border-t px-4 py-3">
+    <div className="border-t px-4 py-4 sm:px-5">
       <div className="flex flex-wrap items-center gap-3">
         <div className="flex items-center gap-2">
-          <Switch id="maker-check" checked={st.enabled} disabled={busy || !st.available} onCheckedChange={(v) => void toggle(v)} />
-          <Label htmlFor="maker-check" className="font-semibold">
+          <Switch id={`maker-check-${asset}`} checked={st.enabled} disabled={busy || !st.available} onCheckedChange={(v) => void toggle(v)} />
+          <Label htmlFor={`maker-check-${asset}`} className="font-semibold">
             Check maker: órdenes límite reales
           </Label>
         </div>
@@ -100,7 +102,6 @@ export function MakerProbeCard({ lat }: { lat: LatencyView }) {
         >
           <ToggleGroupItem value="a">Motor A</ToggleGroupItem>
           <ToggleGroupItem value="c">Motor C</ToggleGroupItem>
-          <ToggleGroupItem value="d">Motor D</ToggleGroupItem>
         </ToggleGroup>
         {st.enabled && <Badge className="bg-sell text-white">ACTIVO · dinero real · {st.done}/{st.max}</Badge>}
         {!st.available && <span className="text-[11px] text-muted-foreground">No disponible: {st.reason}</span>}

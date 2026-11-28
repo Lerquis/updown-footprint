@@ -6,7 +6,7 @@ import type { CompareEngineMarket, CompareEngineTotals, CompareMarketRow, PmEngi
  * Polymarket se mueva). Funciones puras.
  */
 
-export const COMPARE_ENGINES: PmEngineId[] = ["a", "c", "d", "e"];
+export const COMPARE_ENGINES: PmEngineId[] = ["a", "c"];
 
 /** Operaciones y resultado de un motor dentro de un record (A va en `points`/`trades`, el resto en `engines`) */
 export function engineRun(rec: PmRecord, id: PmEngineId): Pick<PmEngineRun, "trades" | "pnl"> | null {

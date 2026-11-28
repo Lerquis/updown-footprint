@@ -89,7 +89,7 @@ export class MarketStore {
     add("trades_ok", "INTEGER");
     // columnas de resumen para listar sin leer el JSON (GET /api/markets)
     for (const [n, t] of [["delta", "REAL"], ["cvd_change", "REAL"], ["bull", "INTEGER"], ["bear", "INTEGER"], ["up_start", "REAL"], ["up_end", "REAL"], ["n_trades", "INTEGER"], ["invested", "REAL"], ["sold", "REAL"], ["change_pct", "REAL"], ["end_ms", "INTEGER"]] as const) add(n, t);
-    // resumen de los motores C, D y E (A usa n_trades / invested / net; b_* queda de cuando existia el motor B)
+    // resumen del motor C (A usa n_trades / invested / net; b_*, d_* y e_* quedan de los motores eliminados B, D y E)
     for (const e of ["b", "c", "d", "e"]) for (const [n, t] of [["trades", "INTEGER"], ["invested", "REAL"], ["net", "REAL"]] as const) add(`${e}_${n}`, t);
     this.backfillSummaries();
   }
@@ -105,11 +105,11 @@ export class MarketStore {
     this.db
       .prepare(
         `UPDATE markets SET delta = ?, cvd_change = ?, bull = ?, bear = ?, up_start = ?, up_end = ?, n_trades = ?, invested = ?, sold = ?, change_pct = ?, end_ms = ?,
-         c_trades = ?, c_invested = ?, c_net = ?, d_trades = ?, d_invested = ?, d_net = ?, e_trades = ?, e_invested = ?, e_net = ? WHERE slug = ?`,
+         c_trades = ?, c_invested = ?, c_net = ? WHERE slug = ?`,
       )
       .run(
         x.delta, x.cvdChange, x.bull, x.bear, x.upStart, x.upEnd, x.trades, x.invested, x.sold, rec.market.changePct, rec.market.end,
-        x.engines.c.trades, x.engines.c.invested, x.engines.c.net, x.engines.d.trades, x.engines.d.invested, x.engines.d.net, x.engines.e.trades, x.engines.e.invested, x.engines.e.net, slug,
+        x.engines.c.trades, x.engines.c.invested, x.engines.c.net, slug,
       );
   }
 
@@ -231,11 +231,11 @@ export class MarketStore {
     const rows = this.db
       .prepare(
         `SELECT slug, start, result, price_to_beat, close_price, delta, cvd_change, bull, bear, up_start, up_end, n_trades, invested, sold, net, change_pct, end_ms, engine_version, trades_ok,
-                c_trades, c_invested, c_net, d_trades, d_invested, d_net, e_trades, e_invested, e_net
+                c_trades, c_invested, c_net
          FROM markets WHERE start >= ? AND start < ? ORDER BY start ${order} LIMIT ?`,
       )
       .all(opts.from ?? 0, opts.to ?? Number.MAX_SAFE_INTEGER, opts.limit ?? -1) as Record<string, number | string | null>[];
-    const eng = (r: Record<string, number | string | null>, e: "c" | "d" | "e") => ({
+    const eng = (r: Record<string, number | string | null>, e: "c") => ({
       trades: (r[`${e}_trades`] as number | null) ?? 0,
       invested: (r[`${e}_invested`] as number | null) ?? 0,
       net: r[`${e}_net`] as number | null,
@@ -262,8 +262,6 @@ export class MarketStore {
         engines: {
           a: { trades: r.n_trades as number, invested: r.invested as number, net: r.net as number | null },
           c: eng(r, "c"),
-          d: eng(r, "d"),
-          e: eng(r, "e"),
         },
         engineVersion: r.engine_version as number | null,
         tradesOk: r.trades_ok === 1,
@@ -305,7 +303,7 @@ export function summarizeRecord(r: PmRecord): Omit<PmMarketRow, "slug" | "start"
     invested: r.pnl.invested,
     sold: r.pnl.sold,
     net: r.pnl.net,
-    engines: { a: { trades: r.trades.length, invested: r.pnl.invested, net: r.pnl.net }, c: sum(r.engines?.c), d: sum(r.engines?.d), e: sum(r.engines?.e) },
+    engines: { a: { trades: r.trades.length, invested: r.pnl.invested, net: r.pnl.net }, c: sum(r.engines?.c) },
   };
 }
 

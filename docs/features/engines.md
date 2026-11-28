@@ -1,8 +1,6 @@
 # Motores A y C y drawer de decisiones
 
-**Estado**: implementada · 2026-11-25 · Decisiones: [ADR 0010](../decisions/0010-motor-sincronizado.md), [ADR 0011](../decisions/0011-tres-motores-guardados-y-base-v2.md), [ADR 0015](../decisions/0015-motores-predictivo-y-maker.md) (se elimina B, +300 ms, porque daba casi lo mismo que C)
-
-Los motores D (predictivo) y E (libro de órdenes), que deciden cada 100 ms con otras reglas, están en [predictive-engines](predictive-engines.md). Comparten el drawer, el gráfico y la base con A y C.
+**Estado**: implementada · 2026-11-25 · Decisiones: [ADR 0010](../decisions/0010-motor-sincronizado.md), [ADR 0011](../decisions/0011-tres-motores-guardados-y-base-v2.md), [ADR 0015](../decisions/0015-motores-predictivo-y-maker.md) (se elimina B, +300 ms, porque daba casi lo mismo que C), [ADR 0020](../decisions/0020-eliminar-motores-d-y-e.md) (se eliminan D y E)
 
 ## Por qué
 Dos servidores (PC y Railway) con los mismos datos daban operaciones distintas en el mismo market. El motor original decidía con una "foto" por segundo sacada en un instante arbitrario del reloj interno de cada servidor (p. ej. x,47 s y x,66 s). El libro de Polymarket cambia muchas veces por segundo, y una diferencia de un tick bastaba para que uno vendiera y el otro no. Ese motor original se conserva en la rama `v1-personal-pc-overpowered`.
@@ -23,8 +21,8 @@ Ambos aplican las mismas reglas (`SignalEngine`, [signal-engine](signal-engine.m
 ## Qué se guarda
 Todos, en cada market guardado (base `polymarket-v2.db`):
 - **Motor A:** sus muestras (`points`) y operaciones (`trades`/`pnl`). Sus muestras son también las del gráfico de precios, y con ellas se decide si el market está completo.
-- **Motores C, D y E:** `engines.c` / `engines.d` / `engines.e` (`PmEngineRun`: muestras, operaciones, `pnl` y, en E, sus órdenes). Los markets de antes del 27 nov pueden traer `engines.b`, que ya no se lee.
-- **Resumen por motor:** columnas en `markets` (`n_trades`/`invested`/`net` para A, `c_*`, `d_*` y `e_*`; `b_*` queda sin uso) y `engines` en `GET /api/markets`.
+- **Motor C:** `engines.c` (`PmEngineRun`: muestras, operaciones y `pnl`). Los markets antiguos pueden traer `engines.b`, `engines.d` y `engines.e` (motores eliminados), que ya no se leen.
+- **Resumen por motor:** columnas en `markets` (`n_trades`/`invested`/`net` para A y `c_*`; `b_*`, `d_*` y `e_*` quedan sin uso) y `engines` en `GET /api/markets`.
 - **Por qué no se guarda el registro de decisiones:** el porqué de cada segundo (`PmDecision`) se reproduce exacto con `replayMarket(market, points)` sobre las muestras del motor.
 
 Unos 60 KB por motor y market.
@@ -41,16 +39,16 @@ Es solo informativo y no cambia ninguna decisión. Viaja por `/ws/engines` ([pro
 ## Frontend
 - **Gráfico:** una sección de probabilidad **por motor** (su P(Up) frente a la del mercado y sus compras y ventas). Debajo van los tokens, Binance, Chainlink, CVD y delta, comunes a todos.
 - **Lista de operaciones** de todos los motores, con una columna "Motor". Debajo, el resultado de cada uno en el market.
-- **Tabla de markets guardados:** "ops · neto" de A, C, D y E, y totales por motor.
+- **Tabla de markets guardados:** "ops · neto" de A y C, y totales por motor.
 - **Botón "Motores"** → drawer:
-  - estado en vivo de los cuatro (P(Up), precios, posición, y comprar/vender con su edge frente al umbral y el motivo; D y E con sus umbrales);
+  - estado en vivo de los dos (P(Up), precios, posición, y comprar/vender con su edge frente al umbral y el motivo);
   - línea de tiempo segundo a segundo, con las diferencias entre A y C (mismas reglas) resaltadas;
-  - los cuatro en los últimos 24 markets guardados.
+  - los dos en los últimos 24 markets guardados.
 
 ## Consumo
-- **Servidor:** A y C, 2 `SignalEngine` y 2 CVD de 1 s por segundo, trivial. D y E: ver [predictive-engines](predictive-engines.md).
-- **Red:** `/ws/polymarket` envía 4 muestras por segundo (más las órdenes de E). `/ws/engines` (registro) solo se abre bajo demanda.
-- **Base:** unas 4 muestras de 1 s por segundo y market.
+- **Servidor:** A y C, 2 `SignalEngine` y 2 CVD de 1 s por segundo, trivial.
+- **Red:** `/ws/polymarket` envía 2 muestras por segundo. `/ws/engines` (registro) solo se abre bajo demanda.
+- **Base:** unas 2 muestras de 1 s por segundo y market.
 
 ## Límites
 - Un dato que tarde más que el retraso de C puede verse en un servidor y no en otro.

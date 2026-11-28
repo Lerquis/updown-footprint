@@ -29,7 +29,7 @@ test("eventos y respuestas del CLOB", () => {
 });
 
 const T = 1_800_000_000_000;
-const market: PmMarket = { slug: "m", title: "", start: T - 100_000, end: T + 200_000, upToken: "u", downToken: "d", status: "live", priceToBeat: 1, closePrice: null, changePct: null, result: null };
+const market: PmMarket = { slug: "m", title: "", start: T - 100_000, end: T + 200_000, upToken: "u", downToken: "c", status: "live", priceToBeat: 1, closePrice: null, changePct: null, result: null };
 const sig = (over: Partial<PmSignal> = {}): PmSignal => ({ id: `s${Math.random()}`, slug: "m", time: T, action: "buy", side: "up", reason: "entry", price: 0.47, fee: 0, shares: 10, amount: 5, pSide: 0.6, edge: 0.1, tau: 100, ...over });
 
 /** Trader falso: responde al instante y emite los eventos del canal de usuario; `fillOn` ejecuta la orden n-esima */
@@ -79,15 +79,15 @@ const next = (p: MakerProbe) => new Promise<MakerProbeSample>((r) => p.once("sam
 
 test("check maker: sigue solo al motor elegido, coloca a bid + 1 tick y cancela si no se llena", async () => {
   const { probe, trader } = setup();
-  probe.setEnabled(true, "d");
+  probe.setEnabled(true, "c");
   probe.onSignals("a", [sig()], market); // otro motor: nada
   assert.equal(trader.posted.length, 0);
   const got = next(probe);
-  probe.onSignals("d", [sig()], market);
+  probe.onSignals("c", [sig()], market);
   const s = await got;
   assert.deepEqual(trader.posted, [{ token: "u", side: "buy", price: 0.46, size: 5 }]);
   assert.equal(s.status, "unfilled");
-  assert.equal(s.engine, "d");
+  assert.equal(s.engine, "c");
   assert.equal(s.userAckMs, 30);
   assert.equal(s.exchangePlaceMs, 25);
   assert.equal(s.cancelMs, 40);
@@ -116,21 +116,18 @@ test("check maker: si se llena no cancela, guarda los tokens y la venta del moto
   assert.equal(s.status, "unfilled");
 });
 
-test("check maker: omite ventas sin tokens, respeta el limite de D y se apaga al llegar al tope", async () => {
+test("check maker: omite ventas sin tokens y se apaga al llegar al tope", async () => {
   const { probe, trader } = setup(1);
-  probe.setEnabled(true, "d");
+  probe.setEnabled(true, "c");
   let got = next(probe);
-  probe.onSignals("d", [sig({ action: "sell", reason: "exit" })], market);
+  probe.onSignals("c", [sig({ action: "sell", reason: "exit" })], market);
   assert.match((await got).error ?? "", /sin tokens/);
   got = next(probe);
-  probe.onSignals("d", [sig({ limit: 0.44 })], market);
-  assert.match((await got).error ?? "", /supera el limite/);
-  got = next(probe);
-  probe.onSignals("d", [sig()], market);
+  probe.onSignals("c", [sig()], market);
   await got;
   assert.equal(trader.posted.length, 1);
   assert.equal(probe.state().enabled, false); // tope de 1 orden
-  probe.onSignals("d", [sig()], market);
+  probe.onSignals("c", [sig()], market);
   assert.equal(trader.posted.length, 1);
 });
 

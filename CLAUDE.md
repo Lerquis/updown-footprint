@@ -5,7 +5,7 @@ Monorepo (npm workspaces): **servidor Node** que consume datos de mercado una so
 ## Mapa
 | Ruta | Qué es | Guía propia |
 |---|---|---|
-| `apps/server` | Node + TypeScript + `ws`. Consume Binance, guarda buffer en memoria, expone canales WS | `apps/server/CLAUDE.md` |
+| `apps/server` | Node + TypeScript + `ws`. Consume Binance (BTC y ETH, spot y futures), guarda buffer en memoria, expone canales WS | `apps/server/CLAUDE.md` |
 | `apps/web` | Next.js (App Router) + React + shadcn/ui + Tailwind v4. Se suscribe a canales WS del servidor | `apps/web/CLAUDE.md` |
 | `packages/protocol` | Tipos y constantes del contrato WS (única fuente de verdad) | `packages/protocol/src/index.ts` |
 | `docs/` | Documentación granular. Índice: `docs/README.md` | — |

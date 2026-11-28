@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { PmPnl, PmRecord, PmSide, PmSignal } from "@updown/protocol";
 import { compareEngine, compareMarkets, compareTotals, firstEntry } from "./compare.js";
-import { splitSource } from "../source.js";
+import { sourceLabel, splitSource } from "../source.js";
 import { sourcePath } from "@updown/protocol";
 
 const T0 = 1_700_000_100_000;
@@ -25,7 +25,7 @@ const sig = (time: number, side: PmSide, price: number, action: "buy" | "sell" =
 
 const pnl = (net: number | null, invested = 5): PmPnl => ({ invested, sold: 0, openUp: 0, openDown: 0, net, roi: null });
 
-const record = (slug: string, start: number, trades: PmSignal[], net: number | null, d: PmSignal[] = []): PmRecord => ({
+const record = (slug: string, start: number, trades: PmSignal[], net: number | null, c: PmSignal[] = []): PmRecord => ({
   market: { slug, title: "", start, end: start + 300_000, upToken: "u", downToken: "d", priceToBeat: 1, closePrice: 2, changePct: 0, status: "closed", result: "up" },
   points: [],
   bars: [],
@@ -33,7 +33,7 @@ const record = (slug: string, start: number, trades: PmSignal[], net: number | n
   signals: [],
   trades,
   pnl: pnl(net),
-  engines: { d: { points: [], trades: d, pnl: pnl(d.length ? 1 : null, d.length ? 5 : 0) } },
+  engines: { c: { points: [], trades: c, pnl: pnl(c.length ? 1 : null, c.length ? 5 : 0) } },
   complete: true,
 });
 
@@ -63,7 +63,7 @@ test("compareEngine: lados distintos o sin entrada => sin adelanto", () => {
   assert.equal(c.leadMs, null);
   assert.equal(c.futuresSide, null);
   // motores secundarios: se leen de `engines`; sin run, resumen vacio
-  const e = compareEngine(s, none, "e");
+  const e = compareEngine(s, none, "c");
   assert.deepEqual(e.spot, { trades: 0, invested: 0, net: null });
 });
 
@@ -87,19 +87,24 @@ test("compareMarkets empareja por slug y compareTotals suma por motor", () => {
   assert.equal(t.a.futuresFirst, 1);
   assert.equal(t.a.avgLeadMs, 200);
   assert.equal(t.a.onlySpot, 1);
-  assert.equal(t.d.sameSide, 1);
-  assert.equal(t.d.spotFirst, 1);
-  assert.equal(t.d.medianLeadMs, -100);
-  assert.equal(t.d.avgPriceDiff, -0.01);
+  assert.equal(t.c.sameSide, 1);
+  assert.equal(t.c.spotFirst, 1);
+  assert.equal(t.c.medianLeadMs, -100);
+  assert.equal(t.c.avgPriceDiff, -0.01);
 });
 
-test("rutas por fuente: sourcePath y splitSource son inversas", () => {
+test("rutas por activo y fuente: sourcePath y splitSource son inversas", () => {
   assert.equal(sourcePath("spot", "/ws/orderflow"), "/ws/orderflow");
   assert.equal(sourcePath("futures", "/ws/orderflow"), "/ws/futures/orderflow");
   assert.equal(sourcePath("futures", "/api/markets/x"), "/api/futures/markets/x");
-  for (const p of ["/ws/orderflow", "/api/markets/abc", "/api/trading/arm"]) {
-    assert.deepEqual(splitSource(sourcePath("futures", p)), { source: "futures", path: p });
-    assert.deepEqual(splitSource(sourcePath("spot", p)), { source: "spot", path: p });
-  }
-  assert.deepEqual(splitSource("/health"), { source: "spot", path: "/health" });
+  assert.equal(sourcePath("spot", "/ws/orderflow", "eth"), "/ws/eth/orderflow");
+  assert.equal(sourcePath("futures", "/api/markets/x", "eth"), "/api/eth/futures/markets/x");
+  for (const asset of ["btc", "eth"] as const)
+    for (const source of ["spot", "futures"] as const)
+      for (const p of ["/ws/orderflow", "/api/markets/abc", "/api/trading/arm"])
+        assert.deepEqual(splitSource(sourcePath(source, p, asset)), { asset, source, path: p });
+  assert.deepEqual(splitSource("/health"), { asset: "btc", source: "spot", path: "/health" });
+  assert.deepEqual(splitSource("/api/ethereum/x"), { asset: "btc", source: "spot", path: "/api/ethereum/x" });
+  assert.equal(sourceLabel("btc", "spot"), "");
+  assert.equal(sourceLabel("eth", "futures"), "eth-futures");
 });

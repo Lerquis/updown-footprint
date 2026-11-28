@@ -18,7 +18,7 @@ interface PredictBookEvents {
  * `PolymarketTracker` y los motores lo usen igual. Predict manda el libro entero de Up en cada mensaje
  * (`predictOrderbook/{marketId}`): el primero (y el primero tras cada reconexion) se emite como `book`; los siguientes como
  * cambios de nivel (`level`). Down es el espejo de Up (1 - precio). Predict no publica el tamano de cada trade, asi que no hay
- * eventos `trade`: el papel maker del motor E solo avanza la cola con los cambios de nivel.
+ * eventos `trade`.
  */
 export class PredictBook extends EventEmitter<PredictBookEvents> implements BookLike {
   private readonly ws: PredictWs;

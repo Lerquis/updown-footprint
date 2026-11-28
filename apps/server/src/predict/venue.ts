@@ -21,8 +21,8 @@ import {
 import { config } from "../config.js";
 import { DbBackup, type BackupConfig } from "../backup/backup.js";
 import type { ExchangeClock } from "../clock.js";
-import { FastRunner, scheduleFast } from "../polymarket/fastRunner.js";
-import { serverFast, serverStrategy } from "../polymarket/serverStrategy.js";
+import { PmBooks } from "../polymarket/pmBook.js";
+import { serverStrategy } from "../polymarket/serverStrategy.js";
 import { ENGINE_VERSION, MarketStore } from "../polymarket/store.js";
 import { PmFeed, scheduleEngine, TimedEngine } from "../polymarket/timedEngine.js";
 import { PolymarketTracker, slotStart, type FlowSource } from "../polymarket/tracker.js";
@@ -36,7 +36,7 @@ import { PredictLiveTrader } from "./liveTrader.js";
 
 const TIMED_IDS = ["a", "c"] as const;
 type TimedId = (typeof TIMED_IDS)[number];
-const ENGINE_IDS: PmEngineId[] = ["a", "c", "d", "e"];
+const ENGINE_IDS: PmEngineId[] = ["a", "c"];
 const MARKET_MS = 5 * 60_000;
 
 export interface PredictVenueDeps {
@@ -48,8 +48,6 @@ export interface PredictVenueDeps {
   /** flujo de Binance de la fuente (se archiva con cada market) y sus senales de footprint (motores A y C) */
   flow: FlowSource;
   signals: () => OrderflowSignal[];
-  /** libro de Binance de la fuente (motores D y E) */
-  binanceBook: ConstructorParameters<typeof FastRunner>[2];
   /** compartidos por las fuentes: rondas por REST y precio Chainlink puntual por WS */
   api: PredictMarketApi;
   price: PredictWs;
@@ -68,8 +66,8 @@ export interface PredictVenueDeps {
 export type PredictVenue = Awaited<ReturnType<typeof createPredictVenue>>;
 
 /**
- * Los mismos motores A, C, D y E (en papel) sobre las rondas BTC Up/Down 5m de Predict.fun, con el flujo de Binance de UNA fuente.
- * Es la misma pila que la de Polymarket en `source.ts` (tracker, PmFeed, TimedEngine, FastRunner, base, canales) con:
+ * Los mismos motores A y C (en papel) sobre las rondas BTC Up/Down 5m de Predict.fun, con el flujo de Binance de UNA fuente.
+ * Es la misma pila que la de Polymarket en `source.ts` (tracker, PmFeed, TimedEngine, base, canales) con:
  *  - `PredictMarketApi` + `PredictBook` en lugar de la API y el libro de Polymarket (tokens sinteticos `<marketId>:up|down`);
  *  - el Chainlink PUNTUAL del WS de Predict en lugar del TWAP (Predict resuelve con el precio, no con un TWAP);
  *  - motores sin TWAP (`twapSeconds` 0, basis contra una media corta de Binance) y la comision de Predict (`serverStrategy("predict")`).
@@ -86,30 +84,14 @@ export async function createPredictVenue(d: PredictVenueDeps) {
   if (dbBackup && bk?.enabled) dbBackup.start();
 
   const strategy = serverStrategy("predict");
-  const fast = serverFast("predict");
   const timedThresholds: PmEngineThresholds = { minEdge: strategy.minEdge, exitMargin: strategy.exitMargin, maxSpread: strategy.maxSpread, warmupS: strategy.warmupS, noEntryS: strategy.noEntryS };
   const engineInfo: PmEngineInfo[] = [
-    ...TIMED_IDS.map((id) => ({ id, mode: id === "a" ? ("live" as const) : ("asOf" as const), delayMs: config.pmEngineDelayMs[id], kind: "taker" as const, thresholds: timedThresholds })),
-    {
-      id: "d",
-      mode: "fast",
-      delayMs: config.pmFast.tickMs,
-      kind: "taker",
-      thresholds: { minEdge: fast.predictive.minEdge, exitMargin: fast.predictive.exitMargin, maxSpread: fast.predictive.maxSpread, warmupS: fast.predictive.warmupS, noEntryS: fast.predictive.noEntryS },
-    },
-    {
-      id: "e",
-      mode: "fast",
-      delayMs: config.pmFast.tickMs,
-      kind: "maker",
-      thresholds: { minEdge: fast.maker.edge, exitMargin: fast.maker.exitEdge, maxSpread: 1, warmupS: fast.maker.warmupS, noEntryS: fast.maker.noEntryS },
-    },
+    ...TIMED_IDS.map((id) => ({ id, mode: id === "a" ? ("live" as const) : ("asOf" as const), delayMs: config.pmEngineDelayMs[id], thresholds: timedThresholds })),
   ];
   const engineParams = {
     venue: "predict",
     source: d.source,
     strategy,
-    fast: { predictive: fast.predictive, maker: fast.maker, drift: fast.drift, paper: config.pmFast.paper, tickMs: config.pmFast.tickMs },
     engines: engineInfo,
   };
 
@@ -133,23 +115,9 @@ export async function createPredictVenue(d: PredictVenueDeps) {
       new TimedEngine({ id, mode: id === "a" ? "live" : "asOf", delayMs: config.pmEngineDelayMs[id], strategy, retentionMs: config.retentionMs, decisionsMax }, feed),
     ]),
   ) as Record<TimedId, TimedEngine>;
-  const fastRunner = new FastRunner(
-    {
-      tickMs: config.pmFast.tickMs,
-      retentionMs: config.retentionMs,
-      decisionsMax,
-      twapSeconds: 0,
-      basisSeconds: config.predict.basisSeconds,
-      predictive: fast.predictive,
-      maker: fast.maker,
-      drift: fast.drift,
-      paper: config.pmFast.paper,
-    },
-    feed,
-    d.binanceBook,
-  );
-  const engineTrack = (id: PmEngineId): { slug: string | null; decisions: PmDecision[] } =>
-    id === "d" || id === "e" ? { slug: fastRunner.slug, decisions: fastRunner.decisions[id].slice() } : { slug: engines3[id].slug, decisions: engines3[id].decisions.slice() };
+  // libro de los tokens de Predict (lo usan las compras reales)
+  const books = new PmBooks();
+  const engineTrack = (id: PmEngineId): { slug: string | null; decisions: PmDecision[] } => ({ slug: engines3[id].slug, decisions: engines3[id].decisions.slice() });
   console.log(`[${tag("db")}] ${d.dbPath}: ${marketStore.count()} markets guardados, ${tracker.history.length} cargados`);
 
   // ── Canales: mismos mensajes que los de Polymarket ──
@@ -162,8 +130,6 @@ export async function createPredictVenue(d: PredictVenueDeps) {
     trades: tracker.trades.slice(),
     engines: {
       c: { points: tracker.live("c").points.slice(), trades: tracker.live("c").trades.slice() },
-      d: { points: tracker.live("d").points.slice(), trades: tracker.live("d").trades.slice() },
-      e: { points: tracker.live("e").points.slice(), trades: tracker.live("e").trades.slice(), orders: (tracker.live("e").orders ?? []).slice() },
     },
     history: tracker.history.slice(),
     historyMax: config.pmHistory,
@@ -182,15 +148,14 @@ export async function createPredictVenue(d: PredictVenueDeps) {
   const onPrice = (p: { time: number; value: number }) => feed.onChainlink(p.time, p.value);
   d.price.on("price", onPrice);
   tracker.on("quote", (q) => feed.onQuote(q.token, q.bid, q.ask, q.time ?? now()));
-  tracker.on("book", (b) => fastRunner.onBook(b.token, b.bids, b.asks, b.time ?? now()));
-  tracker.on("level", (l) => fastRunner.onLevel(l.token, l.side, l.price, l.size, l.time ?? now(), now()));
-  tracker.on("trade", (t) => fastRunner.onTrade(t, now()));
-  // Compras reales siguiendo al motor A, C o D DE ESTA FUENTE (interruptor propio, misma cuenta; ver liveTrader.ts)
+  tracker.on("book", (b) => books.get(b.token).snapshot(b.bids, b.asks, b.time ?? now()));
+  tracker.on("level", (l) => books.get(l.token).set(l.side, l.price, l.size, l.time ?? now()));
+  // Compras reales siguiendo al motor A o C DE ESTA FUENTE (interruptor propio, misma cuenta; ver liveTrader.ts)
   const liveTrader = new PredictLiveTrader(
     { ...config.predict.live, password: config.live.password },
     d.account,
     (marketId) => d.api.tradingInfo(marketId),
-    (token) => (fastRunner.books.has(token) ? fastRunner.books.get(token) : null),
+    (token) => (books.has(token) ? books.get(token) : null),
     now,
     tag("live"),
   );
@@ -220,14 +185,6 @@ export async function createPredictVenue(d: PredictVenueDeps) {
       if (st.signals.length) liveTrader.onSignals(id, st.signals, tracker.current);
       enginesChannel.broadcast({ type: "decision", engine: id, slug: st.slug, decision: st.decision });
     });
-  // el motor D envia sus ordenes al decidir (no tras la ejecucion en papel)
-  fastRunner.on("intent", (signals) => liveTrader.onSignals("d", signals, tracker.current));
-  fastRunner.on("step", (st) => {
-    tracker.addStep(st.engine, st.slug, st.point, []);
-    enginesChannel.broadcast({ type: "decision", engine: st.engine, slug: st.slug, decision: st.decision });
-  });
-  fastRunner.on("fills", (id, slug, signals) => tracker.addSignals(id, slug, signals));
-  fastRunner.on("order", (slug, order) => tracker.addOrder(slug, order));
   const status = () => marketsChannel.broadcast({ type: "status", upstream: upstream() });
   tracker.on("status", status);
   d.price.on("state", status);
@@ -237,7 +194,6 @@ export async function createPredictVenue(d: PredictVenueDeps) {
   });
   tracker.on("point", (engine, point) => ready() && marketsChannel.broadcast({ type: "point", engine, point }));
   tracker.on("signal", (engine, signal) => ready() && marketsChannel.broadcast({ type: "signal", engine, signal }));
-  tracker.on("order", (order) => ready() && marketsChannel.broadcast({ type: "order", engine: "e", order }));
   tracker.on("record", (record) => {
     if (ready()) marketsChannel.broadcast({ type: "record", record });
     if (record.market.status === "closed" && record.complete && marketStore.save(record, { version: ENGINE_VERSION, params: engineParams })) {
@@ -310,12 +266,11 @@ export async function createPredictVenue(d: PredictVenueDeps) {
     /** cada aggTrade de la fuente (tuberia `ingest`) */
     addTrade(t: AggTrade): void {
       for (const id of TIMED_IDS) engines3[id].addTrade(t);
-      fastRunner.addTrade(t);
     },
 
     /** `/api/predict/markets` y `/api/predict/markets/<slug>` (mismas respuestas que las de Polymarket) */
     handleHttp(req: IncomingMessage, res: ServerResponse, path: string, url: URL): boolean {
-      // Interruptor de compras reales en Predict (motor A, C o D de esta fuente, market en curso). Protegido con TRADING_PASSWORD.
+      // Interruptor de compras reales en Predict (motor A o C de esta fuente, market en curso). Protegido con TRADING_PASSWORD.
       if (path === "/api/predict/trading/arm") {
         armRequest(req, res);
         return true;
@@ -374,13 +329,12 @@ export async function createPredictVenue(d: PredictVenueDeps) {
               if (id === "a") {
                 const keep = new Set([tracker.current?.upToken ?? "", tracker.current?.downToken ?? "", tracker.next?.upToken ?? "", tracker.next?.downToken ?? ""]);
                 feed.prune(T - 60_000, keep);
-                fastRunner.books.prune(keep);
+                books.prune(keep);
               }
             },
             ready,
           ),
         );
-      stops.push(scheduleFast(fastRunner, now, (t) => fastRunner.tick(t, marketAt(t)), ready));
     },
 
     async finalBackup(): Promise<void> {

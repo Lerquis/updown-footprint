@@ -1,15 +1,15 @@
 "use client";
 
-import Link from "next/link";
 import { useState } from "react";
-import type { CompareEngineMarket, CompareEngineTotals, PmEngineId } from "@updown/protocol";
-import { buttonVariants } from "@/components/ui/button";
-import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { ASSETS, type CompareEngineMarket, type CompareEngineTotals, type MarketAsset, type PmEngineId } from "@updown/protocol";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { ENGINE_IDS, ENGINE_LABEL } from "@/lib/engines";
 import { useCompare } from "@/lib/useCompare";
 import { cn } from "@/lib/utils";
+import { ASSET_INFO } from "@/lib/source";
+import { AppHeader } from "./AppHeader";
+import { Panel } from "./Panel";
+import { Segmented } from "./Segmented";
 
 const LIMITS = [48, 96, 288] as const;
 
@@ -92,38 +92,47 @@ function EngineCell({ e }: { e: CompareEngineMarket }) {
  * Página /compare: los mismos motores con Binance spot y con futures, en los mismos markets de Polymarket. Lo que más importa es
  * si futures entra antes (adelanto) y más barato (precio de entrada), por el retraso con que se ejecuta en Polymarket.
  */
-export function CompareView() {
+export function CompareView({ initialAsset }: { initialAsset: MarketAsset }) {
   const [limit, setLimit] = useState<number>(96);
-  const st = useCompare(limit);
+  const [asset, setAssetState] = useState<MarketAsset>(initialAsset);
+  const setAsset = (a: MarketAsset) => {
+    setAssetState(a);
+    window.history.replaceState(null, "", `/compare?asset=${a}`);
+  };
+  const st = useCompare(limit, asset);
 
   return (
-    <main className="mx-auto flex max-w-6xl flex-col gap-4 p-4">
-      <header className="flex flex-wrap items-center justify-between gap-2">
-        <h1 className="text-lg font-semibold">Comparativa spot vs futures</h1>
-        <Link href="/" className={buttonVariants({ variant: "outline", size: "sm" })}>
-          Volver al panel
-        </Link>
-      </header>
+    <div className="min-h-screen pb-16">
+      <AppHeader active="compare" />
+      <main className="mx-auto flex max-w-[1680px] flex-col gap-4 px-3 pt-6 sm:px-6 sm:pt-8">
+        <div className="mb-2 flex flex-wrap items-end justify-between gap-4">
+          <div>
+            <h1 className="text-2xl font-bold tracking-tight sm:text-3xl">Comparativa spot vs futures</h1>
+            <p className="mt-1 text-sm text-muted-foreground">{ASSET_INFO[asset].name}: los mismos motores con Binance spot y con futures, en los mismos markets.</p>
+          </div>
+          <Segmented label="Activo" value={asset} onChange={setAsset} options={ASSETS.map((a) => ({ value: a, label: ASSET_INFO[a].ticker }))} />
+        </div>
 
-      <Card className="gap-0 py-0">
-        <CardHeader className="border-b py-3">
-          <CardTitle>Totales por motor</CardTitle>
-          <CardDescription>
+      <Panel
+        id="compare.totals"
+        title="Totales por motor"
+        description={
+          <>
             Markets guardados por las dos fuentes. <b>Adelanto</b> = hora de la primera entrada de spot − la de futures, cuando las dos
             entraron por el mismo lado (positivo: futures antes). <b>Precio entrada</b> = precio de spot − el de futures (positivo: futures
             compró más barato). P&L de papel.
-          </CardDescription>
-          <CardAction>
-            <ToggleGroup variant="outline" size="sm" spacing={0} value={[String(limit)]} onValueChange={(v) => v[0] && setLimit(Number(v[0]))}>
-              {LIMITS.map((l) => (
-                <ToggleGroupItem key={l} value={String(l)}>
-                  {l === 288 ? "24 h" : `${(l * 5) / 60} h`}
-                </ToggleGroupItem>
-              ))}
-            </ToggleGroup>
-          </CardAction>
-        </CardHeader>
-        <CardContent className="p-0">
+          </>
+        }
+        actions={
+          <Segmented
+            label="Periodo"
+            size="xs"
+            value={String(limit)}
+            onChange={(v) => setLimit(Number(v))}
+            options={LIMITS.map((l) => ({ value: String(l), label: l === 288 ? "24 h" : `${(l * 5) / 60} h` }))}
+          />
+        }
+      >
           {st.status === "loading" && <p className="p-4 text-sm text-muted-foreground">Cargando…</p>}
           {st.status === "error" && <p className="p-4 text-sm text-sell">No se pudo cargar: {st.message}</p>}
           {st.status === "ready" && !st.data.futuresEnabled && (
@@ -135,18 +144,14 @@ export function CompareView() {
             </p>
           )}
           {st.status === "ready" && st.data.markets.length > 0 && <TotalsTable totals={st.data.totals} />}
-        </CardContent>
-      </Card>
+      </Panel>
 
       {st.status === "ready" && st.data.markets.length > 0 && (
-        <Card className="gap-0 py-0">
-          <CardHeader className="border-b py-3">
-            <CardTitle>Markets ({st.data.markets.length})</CardTitle>
-            <CardDescription>
-              Por motor: lado de la primera entrada spot / futures, adelanto y diferencia de precio, y P&L spot / futures.
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="p-0">
+        <Panel
+          id="compare.markets"
+          title={`Markets (${st.data.markets.length})`}
+          description="Por motor: lado de la primera entrada spot / futures, adelanto y diferencia de precio, y P&L spot / futures."
+        >
             <Table>
               <TableHeader>
                 <TableRow>
@@ -171,9 +176,9 @@ export function CompareView() {
                 ))}
               </TableBody>
             </Table>
-          </CardContent>
-        </Card>
+        </Panel>
       )}
-    </main>
+      </main>
+    </div>
   );
 }
